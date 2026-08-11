@@ -1,6 +1,6 @@
-"""note 記事(Markdown)から eラーニング用のスライド(.pptx)を生成する。
+"""note 記事(Markdown)から eラーニング用のスライドと、その画像を生成する。
 
-処理は 3 段階に分かれている。
+資料の生成は 3 段階に分かれている。
 
     markdown_reader : Markdown -> Article(ブロック列)
     planner         : Article  -> Deck(スライド構成)
@@ -8,21 +8,30 @@
 
 いずれの段階でも本文の要約・言い換え・追記は行わない。スライド上の文章は
 記事本文をそのまま並べ替えたものになる。
+
+生成した資料は、動画制作で使うスライド画像に変換できる。
+
+    slide_images    : .pptx    -> slide_001.png ...(LibreOffice + pypdfium2)
 """
 
 from .markdown_reader import parse_article, parse_article_file
 from .model import Article, Deck, Slide
 from .planner import PlannerOptions, plan_deck
 from .renderer import render_deck
+from .slide_images import ExportResult, ImageOptions, SlideImage, export_slide_images
 from .style import Style
 
 __all__ = [
     "Article",
     "Deck",
+    "ExportResult",
+    "ImageOptions",
     "PlannerOptions",
     "Slide",
+    "SlideImage",
     "Style",
     "convert_file",
+    "export_slide_images",
     "parse_article",
     "parse_article_file",
     "plan_deck",

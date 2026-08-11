@@ -5,21 +5,23 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "note2slides"
 version = "0.1.0"
-description = "note 記事(Markdown)から eラーニング用のプレゼンテーション(.pptx)を生成する"
+description = "note 記事(Markdown)から eラーニング用のプレゼンテーション(.pptx)とスライド画像を生成する"
 requires-python = ">=3.10"
 dependencies = [
     "python-pptx>=1.0",
     "markdown-it-py>=3.0",
+    "pypdfium2>=4.0",  # PDF をスライド画像に描画する
+    "pillow>=10.0",    # 描画結果を PNG / JPEG として書き出す
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
-    "pypdfium2>=4.0",  # tools/preview_pptx.py で生成結果を画像にする
 ]
 
 [project.scripts]
 note2slides = "note2slides.cli:main"
+note2slides-images = "note2slides.images_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

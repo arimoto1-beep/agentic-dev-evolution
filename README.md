@@ -24,10 +24,14 @@ note記事を入力として、eラーニング形式のYouTube通常動画を�
 
 ## note2slides
 
-Markdown 記事から、16:9 のプレゼンテーション資料(.pptx)を生成するコマンドです。
-動画化パイプラインのうち、最初の「資料生成」にあたります。
+Markdown 記事から、16:9 のプレゼンテーション資料(.pptx)と、動画制作で使うスライド画像を生成します。
+動画化パイプラインのうち、「資料生成」と「スライド画像化」にあたります。
 
-生成物は Office Open XML なので、PowerPoint でも LibreOffice Impress でも開いて編集できます。
+```
+記事(.md) --[note2slides]--> 資料(.pptx) --[note2slides-images]--> slide_001.png ...
+```
+
+資料は Office Open XML なので、PowerPoint でも LibreOffice Impress でも開いて編集できます。
 
 ### セットアップ
 
@@ -40,10 +44,14 @@ python -m venv .venv
 ### 使い方
 
 ```bash
+# 記事 -> 資料
 .venv/Scripts/python.exe -m note2slides.cli samples/sample_article.md -o build/sample.pptx
+
+# 資料 -> スライド画像
+.venv/Scripts/python.exe -m note2slides.images_cli build/sample.pptx -o build/slides
 ```
 
-主なオプション:
+資料生成(note2slides)の主なオプション:
 
 | オプション | 説明 |
 | --- | --- |
@@ -78,22 +86,81 @@ python -m venv .venv
 要約・言い換え・補足の生成は行いません(記号の除去と、文単位への分割のみ行います)。
 言い回しを変えたい場合は、生成後のファイルを直接編集するか、元の記事を修正してください。
 
-### 開発
+## スライド画像への変換(note2slides-images)
+
+資料の各スライドを、1 枚ずつ画像として書き出します。後続の動画生成はこの画像を並べて使います。
 
 ```bash
-.venv/Scripts/python.exe -m pytest              # テスト(LibreOffice が無い環境では該当分をスキップ)
-.venv/Scripts/python.exe -m pytest -m "not slow"  # LibreOffice を使うテストを除く
-
-# 生成結果を画像で確認する(LibreOffice が必要)
-.venv/Scripts/python.exe tools/preview_pptx.py build/sample.pptx --outdir build/preview
+.venv/Scripts/python.exe -m note2slides.images_cli build/sample.pptx -o build/slides
 ```
 
-処理は 3 段階に分かれています。
+```
+build/slides/
+  slide_001.png   1920x1080 / RGB(アルファなし)
+  slide_002.png
+  ...
+  slides.json     スライドの順番と枚数の一覧
+```
+
+* ファイル名は 1 起点の連番なので、辞書順とスライド順が一致します。
+* 全スライドが同じ画素数で出ます(動画のフレームサイズをそろえるため)。
+* 元が 16:9 でない資料は、引き伸ばさずに背景色の余白を足して合わせます。
+* ffmpeg から使う場合は `slide_%03d.png` で読み込めます。
+
+変換は **LibreOffice(ヘッドレス)で PDF にしてから、PDF を目的の解像度で描画** します。
+PowerPoint は不要です。PDF を経由するので、拡大しても文字や図形が劣化しません。
+資料の代わりに PDF を直接入力することもできます(その場合 LibreOffice は不要)。
+
+主なオプション:
+
+| オプション | 説明 |
+| --- | --- |
+| `-o, --outdir` | 出力先(既定は入力と同じ場所の `<名前>_slides`) |
+| `-f, --force` | 出力先に既に画像がある場合に上書きする(古い連番は削除する) |
+| `--width` / `--height` | 画像サイズ(既定は 1920、高さは 16:9 で自動計算) |
+| `--format` | `png`(既定)または `jpg` |
+| `--prefix` / `--digits` | ファイル名の接頭辞と連番の桁数 |
+| `--keep-pdf` | 中間生成物の PDF を残す |
+| `--soffice` | LibreOffice の場所(既定: 自動検出、環境変数 `SOFFICE_PATH` でも指定可) |
+| `--timeout` | LibreOffice の待ち時間(秒、既定 180) |
+| `--check` | 変換に必要な外部ツールの状態だけを表示する |
+
+### 変換に失敗したとき
+
+まず外部ツールの状態を確認します。
+
+```bash
+.venv/Scripts/python.exe -m note2slides.images_cli --check
+```
+
+失敗時のメッセージには、実行した LibreOffice のコマンド・終了コード・出力がそのまま載ります。
+同じコマンドを手元で実行すれば、同じ失敗を再現できます。
+
+| 症状 | 確認すること |
+| --- | --- |
+| LibreOffice が見つからない | インストール状況。`--soffice` か `SOFFICE_PATH` でパスを指定する |
+| LibreOffice が何も出力しない | 他の LibreOffice が起動中でないか(変換専用のプロファイルを使いますが、環境によっては影響します) |
+| 時間切れになる | 資料の枚数や画像の重さ。`--timeout` を延ばす |
+| 枚数が合わない(警告が出る) | 非表示スライドの有無 |
+| 文字化け・フォントが違う | 変換した環境にそのフォントが入っているか(LibreOffice は代替フォントで描画します) |
+
+終了コードは、成功 0 / 引数の誤り 2 / 出力先に既存 3 / 変換失敗 4 / LibreOffice なし 5 です。
+
+## 開発
+
+```bash
+.venv/Scripts/python.exe -m pytest                # テスト(LibreOffice が無い環境では該当分をスキップ)
+.venv/Scripts/python.exe -m pytest -m "not slow"  # LibreOffice を使うテストを除く
+```
+
+処理の流れです。
 
 ```
 markdown_reader : Markdown -> Article(ブロック列)
 planner         : Article  -> Deck(スライド構成)
 renderer        : Deck     -> .pptx
+soffice         : .pptx    -> PDF(LibreOffice をヘッドレスで呼ぶ)
+slide_images    : PDF      -> slide_001.png ...(pypdfium2 で描画)
 ```
 
-レイアウトの調整は `src/note2slides/style.py` に集約しています。
+レイアウトの調整は `src/note2slides/style.py`、画像の出力条件は `ImageOptions` に集約しています。
