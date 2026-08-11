@@ -12,6 +12,13 @@
 
 特定の構造、手法、Engineering概念を採用すること自体を目的にしないでください。
 
+## 開発環境
+
+* Python の仮想環境は `.venv/` に置きます。依存を追加した場合は `pyproject.toml` にも記載してください。
+* テストは `.venv/Scripts/python.exe -m pytest` で実行します(macOS / Linux では `.venv/bin/python`)。
+* 生成物や一時ファイルは `build/` に出力し、コミットしません。
+* 使い方や構成の説明は README.md に書きます。
+
 ## 安全境界
 
 * 不可逆な操作や復旧困難な操作は、人間の承認なしに実行しないでください。
