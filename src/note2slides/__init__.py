@@ -9,13 +9,18 @@
 いずれの段階でも本文の要約・言い換え・追記は行わない。スライド上の文章は
 記事本文をそのまま並べ替えたものになる。
 
-生成した資料は、動画制作で使うスライド画像に変換できる。
+生成した資料は、動画制作で使うスライド画像とナレーション音声に変換できる。
 
     slide_images    : .pptx    -> slide_001.png ...(LibreOffice + pypdfium2)
+    narration + tts : .pptx    -> narration_001.wav ...(Windows の音声合成)
+
+画像と音声は同じ番号(スライド番号)で対応する。
 """
 
+from .audio import AudioOptions, NarrationClip, NarrationResult, export_narration
 from .markdown_reader import parse_article, parse_article_file
 from .model import Article, Deck, Slide
+from .narration import NarrationScript, NarrationSegment, extract_script
 from .planner import PlannerOptions, plan_deck
 from .renderer import render_deck
 from .slide_images import ExportResult, ImageOptions, SlideImage, export_slide_images
@@ -23,15 +28,22 @@ from .style import Style
 
 __all__ = [
     "Article",
+    "AudioOptions",
     "Deck",
     "ExportResult",
     "ImageOptions",
+    "NarrationClip",
+    "NarrationResult",
+    "NarrationScript",
+    "NarrationSegment",
     "PlannerOptions",
     "Slide",
     "SlideImage",
     "Style",
     "convert_file",
+    "export_narration",
     "export_slide_images",
+    "extract_script",
     "parse_article",
     "parse_article_file",
     "plan_deck",

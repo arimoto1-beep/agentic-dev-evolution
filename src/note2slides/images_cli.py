@@ -20,13 +20,8 @@ from .slide_images import (
     export_slide_images,
     ffmpeg_pattern,
 )
-from .soffice import (
-    SofficeError,
-    SofficeNotFoundError,
-    find_soffice,
-    format_command,
-    get_version,
-)
+from .proc import format_command
+from .soffice import SofficeError, SofficeNotFoundError, find_soffice, get_version
 
 EXIT_OK = 0
 EXIT_USAGE = 2

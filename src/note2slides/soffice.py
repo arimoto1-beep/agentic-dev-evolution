@@ -16,6 +16,8 @@ import subprocess
 import tempfile
 from typing import List, Optional
 
+from .proc import CommandError, decode_output as _decode
+
 # soffice の探索順。SOFFICE_PATH で明示指定できる。
 _CANDIDATES = (
     r"C:\Program Files\LibreOffice\program\soffice.exe",
@@ -43,7 +45,7 @@ class SofficeNotFoundError(SofficeError):
         super().__init__(f"LibreOffice(soffice)が見つかりません。{_INSTALL_HINT}{detail}")
 
 
-class SofficeConversionError(SofficeError):
+class SofficeConversionError(CommandError, SofficeError):
     """変換そのものが失敗した場合。原因調査に必要な情報をすべて保持する。"""
 
     def __init__(
@@ -54,35 +56,17 @@ class SofficeConversionError(SofficeError):
         stdout: str = "",
         stderr: str = "",
     ) -> None:
-        self.command = command
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-        super().__init__(f"{reason}\n{self.details()}")
-
-    def details(self) -> str:
-        lines = ["実行したコマンド:", "  " + format_command(self.command)]
-        if self.returncode is not None:
-            lines.append(f"終了コード: {self.returncode}")
-        if self.stdout.strip():
-            lines.append("標準出力:\n" + _indent(self.stdout))
-        if self.stderr.strip():
-            lines.append("標準エラー出力:\n" + _indent(self.stderr))
-        if not self.stdout.strip() and not self.stderr.strip():
-            lines.append(
+        super().__init__(
+            reason,
+            command,
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+            hint=(
                 "LibreOffice は何も出力していません。"
                 "他の LibreOffice が起動中だと変換が無視されることがあります。"
-            )
-        return "\n".join(lines)
-
-
-def _indent(text: str) -> str:
-    return "\n".join("  " + line for line in text.strip().splitlines())
-
-
-def format_command(command: List[str]) -> str:
-    """ログ表示用にコマンドを 1 行で表す。"""
-    return " ".join(f'"{part}"' if " " in part else part for part in command)
+            ),
+        )
 
 
 def candidate_paths(explicit: Optional[str] = None) -> List[str]:
@@ -213,14 +197,3 @@ def convert_to_pdf(
                 stderr=stderr,
             )
         return pdf_path
-
-
-def _decode(data: Optional[bytes]) -> str:
-    if not data:
-        return ""
-    for encoding in ("utf-8", "cp932"):
-        try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return data.decode("utf-8", errors="replace")

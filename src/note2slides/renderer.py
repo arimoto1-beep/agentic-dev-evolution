@@ -225,6 +225,8 @@ class Renderer:
             Inches(style.body_width),
             Inches(height),
         )
+        # ナレーション生成がコードを読み上げないよう、図形の名前で目印を付ける。
+        box.name = "code"
         _paint(box, style.color_code_bg)
         frame = box.text_frame
         frame.word_wrap = False
