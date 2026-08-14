@@ -116,7 +116,7 @@ def test_separator_dot_inside_a_line_is_kept():
 def test_urls_are_not_read():
     plan = plan_reading("詳細は https://example.com/page を見てください。")
 
-    assert texts(plan) == ["詳細は を見てください。"]
+    assert texts(plan) == ["詳細はを見てください。"]
     assert any("URL" in note for note in plan.notes)
 
 
@@ -129,7 +129,7 @@ def test_urls_can_be_read():
 def test_pictographs_are_dropped():
     plan = plan_reading("できました🎉 次へ→進みます。")
 
-    assert texts(plan) == ["できました 次へ 進みます。"]
+    assert texts(plan) == ["できました次へ進みます。"]
     assert any("絵文字" in note for note in plan.notes)
 
 
@@ -137,6 +137,43 @@ def test_rule_lines_are_dropped():
     plan = plan_reading("前の行です。\n---\n次の行です。")
 
     assert texts(plan) == ["前の行です。", "次の行です。"]
+
+
+def test_spaces_inside_japanese_are_closed_up():
+    """「1 枚」の空白を残すと「いち……まい」と間が空いて読まれてしまう。"""
+    plan = plan_reading("1 枚のスライドに、口頭で 30 秒から 60 秒で説明する。")
+
+    assert texts(plan) == ["1枚のスライドに、口頭で30秒から60秒で説明する。"]
+
+
+def test_spaces_between_japanese_and_latin_words_are_closed_up():
+    plan = plan_reading("Markdown 記事から資料を作る。")
+
+    assert texts(plan) == ["Markdown記事から資料を作る。"]
+
+
+def test_spaces_between_latin_words_are_kept():
+    """英数字どうしの空白は語の区切りなので、詰めると別の語に聞こえてしまう。"""
+    plan = plan_reading("note2slides article.md -o article.pptx")
+
+    assert texts(plan) == ["note2slides article.md -o article.pptx。"]
+
+
+def test_space_after_a_symbol_is_kept():
+    """「1. 四つ目」を「1.四つ目」にすると、番号が小数のように読まれかねない。"""
+    plan = plan_reading("1. 四つ目")
+
+    assert texts(plan) == ["1. 四つ目。"]
+
+
+def test_hold_extends_the_silence_after_the_last_utterance():
+    """コードや図は、聞くだけでなく画面を読む時間が要る。"""
+    style = ReadingStyle(tail_silence=0.7)
+
+    plan = plan_reading("画面のコマンドをご覧ください。", style, hold=2.0)
+
+    assert pauses(plan) == [2.7]
+    assert plan_reading("画面のコマンドをご覧ください。", style).utterances[-1].pause_after == 0.7
 
 
 def test_full_width_alphanumerics_are_normalized():
@@ -150,7 +187,7 @@ def test_dictionary_replaces_readings():
 
     plan = plan_reading("note の TTS を使います。", style)
 
-    assert texts(plan) == ["ノート の ティーティーエス を使います。"]
+    assert texts(plan) == ["ノートのティーティーエスを使います。"]
     assert len(plan.notes) == 2
 
 

@@ -188,7 +188,9 @@ def export_narration(
         source=os.path.abspath(source),
         warnings=list(script.warnings),
     )
-    plans = {s.index: plan_reading(s.text, options.reading) for s in script.segments}
+    plans = {
+        s.index: plan_reading(s.text, options.reading, hold=s.hold) for s in script.segments
+    }
 
     os.makedirs(outdir, exist_ok=True)
     if dump_script:

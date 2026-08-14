@@ -7,7 +7,7 @@ Markdown の解析結果(ブロック)と、スライド構成結果(スライ�
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # インライン
@@ -145,6 +145,9 @@ class Slide:
     image_path: Optional[str] = None
     image_alt: str = ""
     notes: str = ""
+    #: 直前のスライドから続いている表・コード(1 枚に収まらず分けたもの)。
+    #: ナレーションで「表の続きです」と案内するために使う。
+    continued: bool = False
 
     def to_dict(self) -> dict:
         """--dump-plan 用。スライド構成の確認・差分比較に使う。"""
@@ -162,9 +165,44 @@ class Slide:
             data["table"] = {"header": self.table_header, "rows": self.table_rows}
         if self.image_path:
             data["image"] = {"path": self.image_path, "alt": self.image_alt}
+        if self.continued:
+            data["continued"] = True
         if self.notes:
             data["notes"] = self.notes
         return data
+
+
+# ---------------------------------------------------------------------------
+# 図形の名前(資料に残す目印)
+# ---------------------------------------------------------------------------
+#
+# 表とコードは、画面には出ているが文字としては読み上げられない。ナレーション側
+# (narration.py)が「何が映っているのか」を判断できるよう、描画側(renderer.py)は
+# 図形の名前に種類を残す。名前は `種類[-continued][:言語]` の形にする。
+#
+#     code            コード
+#     code:bash       bash のコード
+#     table-continued 前のスライドから続いている表
+
+SHAPE_CODE = "code"
+SHAPE_TABLE = "table"
+_SHAPE_CONTINUED = "-continued"
+
+
+def shape_name(kind: str, continued: bool = False, language: str = "") -> str:
+    """描画側が図形に付ける名前を組み立てる。"""
+    name = kind + (_SHAPE_CONTINUED if continued else "")
+    language = (language or "").strip()
+    return f"{name}:{language}" if language else name
+
+
+def parse_shape_name(name: Optional[str]) -> Tuple[str, bool, str]:
+    """図形の名前から「種類・続きかどうか・言語」を読み取る。"""
+    base, _, language = (name or "").strip().lower().partition(":")
+    continued = base.endswith(_SHAPE_CONTINUED)
+    if continued:
+        base = base[: -len(_SHAPE_CONTINUED)]
+    return base, continued, language
 
 
 @dataclass

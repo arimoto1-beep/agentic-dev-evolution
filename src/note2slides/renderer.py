@@ -24,10 +24,13 @@ from .model import (
     KIND_TITLE,
     NUMBER,
     QUOTE,
+    SHAPE_CODE,
+    SHAPE_TABLE,
     Bullet,
     Deck,
     Run,
     Slide,
+    shape_name,
 )
 from .style import SLIDE_HEIGHT_EMU, SLIDE_WIDTH_EMU, Style
 
@@ -225,8 +228,9 @@ class Renderer:
             Inches(style.body_width),
             Inches(height),
         )
-        # ナレーション生成がコードを読み上げないよう、図形の名前で目印を付ける。
-        box.name = "code"
+        # ナレーション生成がコードをそのまま読み上げず、画面の案内文にできるよう、
+        # 図形の名前に種類を残す(model.shape_name)。
+        box.name = shape_name(SHAPE_CODE, slide.continued, slide.code_lang)
         _paint(box, style.color_code_bg)
         frame = box.text_frame
         frame.word_wrap = False
@@ -270,6 +274,7 @@ class Renderer:
             Inches(style.body_width),
             Inches(height),
         )
+        shape.name = shape_name(SHAPE_TABLE, slide.continued)
         table = shape.table
         table.first_row = bool(header)
 

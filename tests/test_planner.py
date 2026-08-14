@@ -114,6 +114,44 @@ def test_notes_can_be_disabled():
     assert deck.slides[0].notes == ""
 
 
+def test_notes_only_cover_the_bullets_on_that_slide():
+    """ナレーションは、そのスライドに出ている内容と対応している必要がある。
+
+    まとめて 1 枚目のノートに入れると、まだ画面に出ていない文を読み上げてしまう。
+    """
+    body = "".join(f"これは{i}番目の説明文です。" for i in range(40))
+    deck = _plan(f"## 長い節\n\n{body}\n", title_slide=False)
+
+    assert len(deck.slides) > 1
+    for slide in deck.slides:
+        shown = "".join(b.text for b in slide.bullets)
+        assert slide.notes.replace(" ", "") == shown
+    assert "".join(s.notes.replace(" ", "") for s in deck.slides) == body
+
+
+def test_notes_of_a_list_keep_one_item_per_line():
+    deck = _plan("## A\n\n- 一つ目\n- 二つ目\n", title_slide=False)
+
+    assert deck.slides[0].notes == "一つ目\n二つ目"
+
+
+def test_split_table_and_code_are_marked_as_continued():
+    """「続き」かどうかは、見出しの重なりではなく分割そのもので決める。"""
+    rows = "\n".join(f"| {i} | {i} |" for i in range(15))
+    deck = _plan(f"## A\n\n| a | b |\n| --- | --- |\n{rows}\n", title_slide=False, max_table_rows=10)
+
+    assert [s.continued for s in deck.slides] == [False, True]
+
+
+def test_a_table_after_a_paragraph_is_not_continued():
+    deck = _plan("## A\n\n本文。\n\n| a |\n| --- |\n| 1 |\n", title_slide=False)
+
+    assert _kinds(deck) == [KIND_BULLETS, KIND_TABLE]
+    # 見出しが同じで「（続き）」が付いていても、表そのものは続きではない。
+    assert deck.slides[1].title.endswith("（続き）")
+    assert deck.slides[1].continued is False
+
+
 def test_deck_title_option_overrides():
     deck = _plan("# 元タイトル\n\n本文。\n", deck_title="指定タイトル")
     assert deck.slides[0].title == "指定タイトル"

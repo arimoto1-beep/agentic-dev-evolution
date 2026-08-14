@@ -295,7 +295,7 @@ def test_reading_text_is_recorded(tmp_path):
     assert clip.text.startswith("・箇条書きの項目")  # 原稿は元のまま
     assert "・" not in clip.reading
     assert "https" not in clip.reading
-    assert clip.reading == "箇条書きの項目。 詳しくは を見てください。"
+    assert clip.reading == "箇条書きの項目。 詳しくはを見てください。"
     assert any("URL" in note for note in clip.notes)
     assert manifest_of(outdir)["clips"][0]["reading"] == clip.reading
 
@@ -311,6 +311,27 @@ def test_text_that_becomes_unreadable_is_silent(tmp_path):
     assert result.clips[0].text  # 原稿には文章が残っている
 
 
+def test_hold_makes_the_slide_longer(tmp_path):
+    """コードや図のスライドは、読み上げが終わっても画面を読む時間が要る。"""
+    path = tmp_path / "script.json"
+    path.write_text(
+        json.dumps(
+            {
+                "segments": [
+                    {"index": 1, "text": "画面のコマンドをご覧ください。"},
+                    {"index": 2, "text": "画面のコマンドをご覧ください。", "hold": 3.0},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = export_narration(str(path), str(tmp_path / "audio"), engine=FakeEngine())
+
+    assert result.clips[1].duration == pytest.approx(result.clips[0].duration + 3.0, abs=0.01)
+
+
 def test_reading_dictionary_is_applied(tmp_path):
     source = make_script(tmp_path, ["note の記事です。"])
     style = ReadingStyle(dictionary={"note": "ノート"})
@@ -319,7 +340,7 @@ def test_reading_dictionary_is_applied(tmp_path):
         source, str(tmp_path / "audio"), AudioOptions(reading=style), engine=FakeEngine()
     )
 
-    assert result.clips[0].reading == "ノート の記事です。"
+    assert result.clips[0].reading == "ノートの記事です。"
     assert any("ノート" in note for note in result.clips[0].notes)
 
 

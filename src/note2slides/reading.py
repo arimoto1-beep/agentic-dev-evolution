@@ -15,10 +15,17 @@
     * 行頭の箇条書き記号を落とす(画面には出ているが読み上げる文字ではない)
     * 絵文字・罫線など、読み上げても音にならない文字を落とす
     * URL を落とす(1 文字ずつ読まれてしまい、聞いても意味が取れない)
+    * 日本語の間に入った空白を詰める(下記)
     * 文末に句点が無い行に句点を補う(無いと語尾が上がったまま次の文に続く)
     * 利用者が指定した読み方辞書で置き換える
 
 「文末に句点を補う」以外は文字を減らすだけで、元の記事に無い内容は足さない。
+
+日本語の間の空白を詰めるのは、記事では「1 枚」「30 秒」のように数字と単位の
+間に空白を入れて書くことがあり、合成エンジンがそこを語の切れ目とみなして
+「いち……まい」と間を空けて読んでしまうため。空白は表記上のものなので、
+詰めても意味は変わらない(画面には元の表記がそのまま出る)。英数字どうしの
+空白は語の区切りなので残す(`note2slides article.md` は 2 語のまま読む)。
 """
 
 from __future__ import annotations
@@ -53,6 +60,16 @@ _PICTOGRAPH = re.compile(
     "]"
 )
 _SPACES = re.compile(r"[ \t　]+")
+# 日本語(かな・漢字・和文の記号)。NFKC 正規化のあとを見るので、半角カナは
+# 全角に、全角英数は半角になっている。
+_JAPANESE_CHAR = r"[　-〿぀-ヿ㐀-䶿一-鿿豈-﫿]"
+# 片側が日本語で、もう片側も語の一部(日本語か英数字)になっている空白。ここは
+# 語の区切りではないので詰める。記号が隣にある空白(「1. 四つ目」の「.」など)は、
+# 詰めると読み方が変わることがあるため残す。
+_JAPANESE_SPACE = re.compile(
+    rf"(?<={_JAPANESE_CHAR}) (?=(?:{_JAPANESE_CHAR}|[0-9A-Za-z]))"
+    rf"|(?<=[0-9A-Za-z]) (?={_JAPANESE_CHAR})"
+)
 
 
 @dataclass
@@ -122,8 +139,14 @@ class ReadingPlan:
         }
 
 
-def plan_reading(text: str, style: Optional[ReadingStyle] = None) -> ReadingPlan:
-    """原稿 1 枚分を、読み上げる単位と間に分ける。"""
+def plan_reading(
+    text: str, style: Optional[ReadingStyle] = None, hold: float = 0.0
+) -> ReadingPlan:
+    """原稿 1 枚分を、読み上げる単位と間に分ける。
+
+    `hold` は読み終わったあとに足す無音(秒)。コードや図のように、聞くだけでは
+    足りず画面を読む必要があるスライドで、読む時間を作るために使う。
+    """
     style = style or ReadingStyle()
     plan = ReadingPlan(lead_silence=style.lead_silence)
     if not text or not text.strip():
@@ -134,13 +157,14 @@ def plan_reading(text: str, style: Optional[ReadingStyle] = None) -> ReadingPlan
     if not lines:
         return plan
 
+    tail_silence = style.tail_silence + max(0.0, hold)
     for line_number, line in enumerate(lines):
         pieces = _split_line(line, style)
         last_line = line_number == len(lines) - 1
         for piece_number, (piece, at_sentence_end) in enumerate(pieces):
             last_piece = piece_number == len(pieces) - 1
             if last_piece:
-                pause = style.tail_silence if last_line else style.line_pause
+                pause = tail_silence if last_line else style.line_pause
             elif at_sentence_end:
                 pause = style.sentence_pause
             else:
@@ -180,6 +204,7 @@ def _normalize(text: str, style: ReadingStyle) -> tuple[List[str], List[str]]:
         if _RULE_LINE.match(raw):
             continue
         line = _SPACES.sub(" ", _LIST_MARKER.sub("", raw)).strip()
+        line = _JAPANESE_SPACE.sub("", line)
         if line:
             lines.append(line)
     return lines, notes

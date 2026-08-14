@@ -12,6 +12,7 @@ from note2slides import narration
 from note2slides.model import (
     KIND_BULLETS,
     KIND_CODE,
+    KIND_IMAGE,
     KIND_SECTION,
     KIND_TABLE,
     KIND_TITLE,
@@ -95,40 +96,162 @@ def test_section_slide_reads_its_title(tmp_path):
 
 
 def test_continuation_marker_is_not_read_aloud(tmp_path):
-    """「（続き）」は画面上の目印。読み上げると「かっこ つづき」になってしまう。"""
+    """「（続き）」は画面上の目印。読み上げると「かっこ つづき」になってしまう。
+
+    見出しは前のスライドで読み上げているので、続きのスライドでは繰り返さない。
+    """
     path = make_pptx(
         tmp_path,
-        [Slide(kind=KIND_CODE, title="変換を自動化する（続き）", code="echo hello")],
+        [Slide(kind=KIND_BULLETS, title="変換を自動化する（続き）", bullets=[Bullet([Run("要点")])])],
     )
+
+    segment = extract_script(path).segments[0]
+
+    assert segment.text == "要点"
+    assert "続き" not in segment.text
+    assert segment.title == "変換を自動化する（続き）"  # 一覧では元のタイトルを示す
+
+
+def test_title_is_read_when_nothing_else_is_on_the_slide(tmp_path):
+    path = make_pptx(tmp_path, [Slide(kind=KIND_SECTION, title="変換を自動化する（続き）")])
 
     segment = extract_script(path).segments[0]
 
     assert segment.text == "変換を自動化する"
-    assert segment.title == "変換を自動化する（続き）"  # 一覧では元のタイトルを示す
 
 
-def test_code_is_not_read_aloud(tmp_path):
-    # コードをそのまま読み上げても聞き取れないため、タイトルだけを読む。
+# ---------------------------------------------------------------------------
+# 画面に出ているものの案内
+# ---------------------------------------------------------------------------
+
+
+def test_code_slide_points_at_the_screen(tmp_path):
+    """コードは 1 文字ずつ読んでも聞き取れない。何が出ているかを伝えて画面へ導く。"""
     path = make_pptx(
         tmp_path,
-        [Slide(kind=KIND_CODE, title="コード例", code="print('hello')\nexit(0)")],
+        [Slide(kind=KIND_CODE, title="コード例", code="print('hello')\nexit(0)", code_lang="python")],
     )
 
     segment = extract_script(path).segments[0]
 
-    assert segment.text == "コード例"
+    assert segment.source == narration.SOURCE_SCREEN
+    assert segment.text == "コード例\n画面のコードをご覧ください。\nパイソンのコードを2行示しています。"
     assert "print" not in segment.text
+    # 画面のコードを読む時間を取る(そのぶんスライドが長く映る)。
+    assert segment.hold > 0
 
 
-def test_table_is_not_read_aloud(tmp_path):
+def test_shell_code_is_called_a_command(tmp_path):
     path = make_pptx(
         tmp_path,
-        [Slide(kind=KIND_TABLE, title="対応表", table_header=["工程"], table_rows=[["画像化"]])],
+        [Slide(kind=KIND_CODE, title="実行する", code="note2slides article.md", code_lang="bash")],
     )
 
     segment = extract_script(path).segments[0]
 
-    assert segment.text == "対応表"
+    assert segment.text == "実行する\n画面のコマンドをご覧ください。"
+
+
+def test_japanese_comments_in_code_are_read(tmp_path):
+    """コメントは書き手が読み手に向けて書いた文なので、そのまま読み上げる。"""
+    path = make_pptx(
+        tmp_path,
+        [
+            Slide(
+                kind=KIND_CODE,
+                title="",
+                code="#!/bin/sh\n# 記事から資料を作る\nnote2slides article.md",
+                code_lang="bash",
+            )
+        ],
+    )
+
+    segment = extract_script(path).segments[0]
+
+    assert "記事から資料を作る" in segment.text
+    assert "bin/sh" not in segment.text  # 日本語を含まないコメントは読み上げない
+
+
+def test_table_is_read_row_by_row(tmp_path):
+    """表を映すだけでは、視聴者は何を読み取ればよいのか分からない。"""
+    path = make_pptx(
+        tmp_path,
+        [
+            Slide(
+                kind=KIND_TABLE,
+                title="対応表",
+                table_header=["工程", "入力", "出力"],
+                table_rows=[["画像化", "資料", "スライド画像"]],
+            )
+        ],
+    )
+
+    segment = extract_script(path).segments[0]
+
+    assert segment.source == narration.SOURCE_SCREEN
+    assert segment.text == (
+        "対応表\n"
+        "画面の表をご覧ください。\n"
+        "列は左から、工程、入力、出力です。\n"
+        "画像化の行は、入力が資料、出力がスライド画像です。"
+    )
+
+
+def test_split_table_says_it_continues(tmp_path):
+    path = make_pptx(
+        tmp_path,
+        [
+            Slide(
+                kind=KIND_TABLE,
+                title="対応表（続き）",
+                table_header=["工程", "入力"],
+                table_rows=[["画像化", "資料"]],
+                continued=True,
+            )
+        ],
+    )
+
+    segment = extract_script(path).segments[0]
+
+    assert segment.text.startswith("表の続きです。")
+
+
+def test_image_slide_points_at_the_screen_and_reads_its_caption(tmp_path):
+    from PIL import Image as PILImage
+
+    png = tmp_path / "figure.png"
+    PILImage.new("RGB", (320, 180), (230, 230, 230)).save(png)
+    path = make_pptx(
+        tmp_path,
+        [Slide(kind=KIND_IMAGE, title="構成図", image_path=str(png), image_alt="全体の流れ")],
+    )
+
+    segment = extract_script(path).segments[0]
+
+    assert segment.source == narration.SOURCE_SCREEN
+    assert segment.text == "構成図\n画面の図をご覧ください。\n全体の流れ"
+    assert segment.hold > 0
+
+
+def test_notes_take_priority_over_the_screen_guidance(tmp_path):
+    """人が書いたノートがあれば、それをそのまま読む(案内文で上書きしない)。"""
+    path = make_pptx(
+        tmp_path,
+        [
+            Slide(
+                kind=KIND_TABLE,
+                title="対応表",
+                table_header=["工程"],
+                table_rows=[["画像化"]],
+                notes="工程ごとの対応をまとめました。",
+            )
+        ],
+    )
+
+    segment = extract_script(path).segments[0]
+
+    assert segment.source == narration.SOURCE_NOTES
+    assert segment.text == "工程ごとの対応をまとめました。"
 
 
 def test_slide_without_text_becomes_silent(tmp_path):
@@ -209,6 +332,28 @@ def test_edited_script_can_be_used_as_input(tmp_path):
     assert script.segments[0].text == "読みを直した文章"
 
 
+def test_hold_survives_the_round_trip(tmp_path):
+    """画面を読む時間も原稿に残す(手で直せるようにする)。"""
+    path = make_pptx(tmp_path, [Slide(kind=KIND_CODE, title="例", code="ls", code_lang="bash")])
+    out = tmp_path / "script.json"
+
+    extract_script(path).write(str(out))
+    loaded = read_script(str(out))
+
+    assert loaded.segments[0].hold > 0
+    assert json.loads(out.read_text(encoding="utf-8"))["segments"][0]["hold"] > 0
+
+
+def test_hold_must_be_a_positive_number(tmp_path):
+    out = tmp_path / "script.json"
+    out.write_text(json.dumps({"segments": [{"index": 1, "text": "あ", "hold": -1}]}), "utf-8")
+
+    with pytest.raises(NarrationError) as excinfo:
+        read_script(str(out))
+
+    assert "hold" in str(excinfo.value)
+
+
 def test_script_index_must_be_continuous(tmp_path):
     out = tmp_path / "script.json"
     out.write_text(
@@ -238,6 +383,26 @@ def test_empty_script_is_rejected(tmp_path):
 
     with pytest.raises(NarrationError):
         read_script(str(out))
+
+
+def test_failure_says_which_slide_it_was(tmp_path, monkeypatch):
+    """どの 1 枚で止まったか分からないと、資料のどこを直せばよいか調べようがない。"""
+    path = make_pptx(tmp_path, [bullets("一"), bullets("二", title="壊れた見出し")])
+
+    def explode(slide, number):
+        if number == 2:
+            raise ValueError("読めない図形")
+        return NarrationSegment(number)
+
+    monkeypatch.setattr(narration, "_segment_of", explode)
+
+    with pytest.raises(NarrationError) as excinfo:
+        extract_script(path)
+
+    message = str(excinfo.value)
+    assert "スライド 2" in message
+    assert "壊れた見出し" in message
+    assert "読めない図形" in message
 
 
 def test_unsupported_input(tmp_path):

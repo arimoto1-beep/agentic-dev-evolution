@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from . import metrics
 from .model import (
@@ -68,7 +68,12 @@ class _Planner:
         self.current_title = ""
         self.title_use_count: dict = {}
         self.pending: List[Bullet] = []
-        self.pending_notes: List[str] = []
+        # 溜めている箇条書きが、記事のどのブロック(段落・項目)から来たか。
+        # スライドが分かれたときに、そのスライドに出ている分だけを読み上げる
+        # ノートにするために使う。
+        self.pending_blocks: List[int] = []
+        self.block_texts: Dict[int, str] = {}
+        self.block_serial = 0
 
     # -- 実行 -----------------------------------------------------------
     def run(self) -> Deck:
@@ -149,29 +154,30 @@ class _Planner:
 
         if isinstance(block, Paragraph):
             kind = QUOTE if block.quote else BULLET
+            source = self._open_block(_text(block.runs))
             for runs in self._split_sentences(block.runs):
-                self.pending.append(Bullet(runs=runs, level=0, kind=kind))
-            self.pending_notes.append(_text(block.runs))
+                self._add(Bullet(runs=runs, level=0, kind=kind), source)
             return
 
         if isinstance(block, ListBlock):
             for item in block.items:
                 kind = QUOTE if item.quote else (NUMBER if item.ordered else BULLET)
-                self.pending.append(
-                    Bullet(runs=item.runs, level=min(item.level, 3), kind=kind, number=item.number)
+                self._add(
+                    Bullet(runs=item.runs, level=min(item.level, 3), kind=kind, number=item.number),
+                    self._open_block(_text(item.runs)),
                 )
-                self.pending_notes.append(_text(item.runs))
             return
 
         if isinstance(block, CodeBlock):
             self._flush()
-            for chunk in _chunk_lines(block.text, self.opt.max_code_lines):
+            for index, chunk in enumerate(_chunk_lines(block.text, self.opt.max_code_lines)):
                 self.deck.slides.append(
                     Slide(
                         kind=KIND_CODE,
                         title=self._next_title(),
                         code=chunk,
                         code_lang=block.lang,
+                        continued=index > 0,
                     )
                 )
             return
@@ -183,13 +189,14 @@ class _Planner:
                 rows[i : i + self.opt.max_table_rows]
                 for i in range(0, len(rows), self.opt.max_table_rows)
             ] or [[]]
-            for chunk in chunks:
+            for index, chunk in enumerate(chunks):
                 self.deck.slides.append(
                     Slide(
                         kind=KIND_TABLE,
                         title=self._next_title(),
                         table_header=block.header,
                         table_rows=chunk,
+                        continued=index > 0,
                     )
                 )
             return
@@ -204,7 +211,8 @@ class _Planner:
             # 参照先が見つからない画像は本文に事実として残す(内容は補わない)。
             self.deck.warnings.append(f"画像が見つかりません: {block.src}")
             label = block.alt or block.src
-            self.pending.append(Bullet(runs=[Run(f"[画像] {label}")], level=0, kind=BULLET))
+            text = f"[画像] {label}"
+            self._add(Bullet(runs=[Run(text)], level=0, kind=BULLET), self._open_block(text))
             return
         self._flush()
         self.deck.slides.append(
@@ -219,24 +227,71 @@ class _Planner:
         return candidate if os.path.isfile(candidate) else None
 
     # -- スライド確定 ---------------------------------------------------
+    def _open_block(self, text: str) -> int:
+        """記事のブロック(段落・項目)を 1 つ開き、その番号を返す。"""
+        self.block_serial += 1
+        self.block_texts[self.block_serial] = text
+        return self.block_serial
+
+    def _add(self, bullet: Bullet, block: int) -> None:
+        self.pending.append(bullet)
+        self.pending_blocks.append(block)
+
     def _flush(self) -> None:
         """溜まった箇条書きを、容量に収まる単位でスライドへ切り出す。"""
         if not self.pending:
-            self.pending_notes = []
+            self._clear_pending()
             return
         pages = self._paginate(self.pending)
-        notes = "\n".join(n for n in self.pending_notes if n) if self.opt.include_notes else ""
-        for index, page in enumerate(pages):
+        totals: Dict[int, int] = {}
+        for block in self.pending_blocks:
+            totals[block] = totals.get(block, 0) + 1
+
+        cursor = 0
+        for page in pages:
+            blocks = self.pending_blocks[cursor : cursor + len(page)]
+            cursor += len(page)
             self.deck.slides.append(
                 Slide(
                     kind=KIND_BULLETS,
                     title=self._next_title(),
                     bullets=page,
-                    notes=notes if index == 0 else "",
+                    notes=self._notes_for(page, blocks, totals) if self.opt.include_notes else "",
                 )
             )
+        self._clear_pending()
+
+    def _clear_pending(self) -> None:
         self.pending = []
-        self.pending_notes = []
+        self.pending_blocks = []
+        self.block_texts = {}
+
+    def _notes_for(self, page: List[Bullet], blocks: List[int], totals: Dict[int, int]) -> str:
+        """そのスライドに出ている行の、記事での文章を集める。
+
+        ナレーションは画面に出ている内容と対応している必要がある。1 つの段落が
+        次のスライドへ分かれた場合は、そのスライドに出ている文だけを読み上げる
+        (分かれていなければ、段落を 1 文につなげた元の文章をそのまま読む)。
+
+        `blocks` はこのスライドの各行がどのブロックから来たか、`totals` は
+        ブロックごとの行数(全スライド分)。
+        """
+        lines: List[str] = []
+        position = 0
+        while position < len(blocks):
+            end = position
+            while end < len(blocks) and blocks[end] == blocks[position]:
+                end += 1
+            whole = end - position == totals[blocks[position]]
+            text = (
+                self.block_texts[blocks[position]]
+                if whole
+                else " ".join(b.text for b in page[position:end])
+            )
+            if text.strip():
+                lines.append(text.strip())
+            position = end
+        return "\n".join(lines)
 
     def _paginate(self, bullets: List[Bullet]) -> List[List[Bullet]]:
         limit = self.style.body_height_pt
