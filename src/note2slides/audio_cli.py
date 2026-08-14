@@ -12,7 +12,11 @@ from typing import List, Optional
 
 from . import __version__
 from . import tts as tts_mod
+from . import voicevox as voicevox_mod
 from .audio import (
+    DEFAULT_LOUDNESS_LUFS,
+    DEFAULT_PEAK_CEILING_DBFS,
+    DEFAULT_SAMPLE_RATE,
     SCRIPT_NAME,
     AudioExportError,
     AudioOptions,
@@ -22,6 +26,7 @@ from .audio import (
     ffmpeg_pattern,
 )
 from .narration import NarrationError, extract_script
+from .reading import ReadingStyle, load_dictionary
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -45,35 +50,115 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-f", "--force", action="store_true", help="出力先に既に音声がある場合に上書きする"
     )
-    parser.add_argument(
+
+    voice_group = parser.add_argument_group("声")
+    voice_group.add_argument(
         "--engine",
         choices=(tts_mod.ENGINE_AUTO,) + tts_mod.ENGINES,
         default=tts_mod.ENGINE_AUTO,
-        help="音声合成の方式(既定: auto)",
+        help="音声合成の方式(既定: auto = voicevox を優先)",
     )
-    parser.add_argument("--voice", help="使う音声の名前(既定: 指定言語の最初の音声)")
-    parser.add_argument("--language", default="ja", help="音声を選ぶときの言語(既定: ja)")
-    parser.add_argument(
+    voice_group.add_argument(
+        "--voice", help="使う音声の名前(voicevox は「話者/スタイル」の形で指定する)"
+    )
+    voice_group.add_argument("--language", default="ja", help="音声を選ぶときの言語(既定: ja)")
+    voice_group.add_argument(
         "--speed", type=float, default=1.0, help="読み上げ速度の倍率(既定: 1.0)"
     )
-    parser.add_argument("--volume", type=int, default=100, help="音量(0-100、既定: 100)")
-    parser.add_argument(
-        "--sample-rate", type=int, help="標本化周波数(既定: 48000 / sapi のみ指定できる)"
+    voice_group.add_argument(
+        "--pitch", type=float, default=0.0, help="声の高さ(voicevox のみ、既定: 0.0)"
     )
-    parser.add_argument(
+    voice_group.add_argument(
+        "--intonation",
+        type=float,
+        default=1.0,
+        help="抑揚の強さ(voicevox のみ、既定: 1.0。小さくすると平坦になる)",
+    )
+    voice_group.add_argument("--volume", type=int, default=100, help="音量(0-100、既定: 100)")
+
+    reading_group = parser.add_argument_group("読み方と間")
+    reading_group.add_argument(
+        "--sentence-pause", type=float, default=0.35, help="文と文の間(秒、既定: 0.35)"
+    )
+    reading_group.add_argument(
+        "--line-pause", type=float, default=0.6, help="行と行の間(秒、既定: 0.6)"
+    )
+    reading_group.add_argument(
+        "--lead-silence",
+        type=float,
+        default=0.3,
+        help="スライドが変わってから話し始めるまでの無音(秒、既定: 0.3)",
+    )
+    reading_group.add_argument(
         "--tail-silence",
         type=float,
-        default=0.5,
-        help="各スライドの読み上げ後に足す無音の秒数(既定: 0.5)",
+        default=0.7,
+        help="話し終わってから次のスライドまでの無音(秒、既定: 0.7)",
     )
-    parser.add_argument(
+    reading_group.add_argument(
+        "--max-chars", type=int, default=100, help="この長さを超える文は読点で区切る(既定: 100)"
+    )
+    reading_group.add_argument(
+        "--dict", metavar="PATH", help='読み方辞書(JSON。{"表記": "よみ"} の形)'
+    )
+    reading_group.add_argument(
+        "--read-urls", action="store_true", help="URL も読み上げる(既定は読み上げない)"
+    )
+    reading_group.add_argument(
         "--silence",
         type=float,
         default=2.0,
         help="読み上げる文章が無いスライドの長さ(秒、既定: 2.0)",
     )
-    parser.add_argument("--prefix", default="narration_", help="ファイル名の接頭辞")
-    parser.add_argument("--digits", type=int, default=3, help="連番の桁数(既定: 3)")
+
+    output_group = parser.add_argument_group("音声ファイル")
+    output_group.add_argument(
+        "--sample-rate",
+        type=int,
+        default=DEFAULT_SAMPLE_RATE,
+        help=f"標本化周波数(既定: {DEFAULT_SAMPLE_RATE})",
+    )
+    output_group.add_argument(
+        "--loudness",
+        type=float,
+        default=DEFAULT_LOUDNESS_LUFS,
+        help=f"全体でそろえる音量(LUFS、既定: {DEFAULT_LOUDNESS_LUFS:g})",
+    )
+    output_group.add_argument(
+        "--no-loudness", action="store_true", help="音量の調整をしない(合成したままの音量にする)"
+    )
+    output_group.add_argument(
+        "--peak-ceiling",
+        type=float,
+        default=DEFAULT_PEAK_CEILING_DBFS,
+        help=f"最大振幅の上限(dBFS、既定: {DEFAULT_PEAK_CEILING_DBFS:g})",
+    )
+    output_group.add_argument("--prefix", default="narration_", help="ファイル名の接頭辞")
+    output_group.add_argument("--digits", type=int, default=3, help="連番の桁数(既定: 3)")
+
+    engine_group = parser.add_argument_group("エンジンの場所")
+    engine_group.add_argument(
+        "--voicevox-url",
+        help=f"VOICEVOX ENGINE の場所(既定: {voicevox_mod.DEFAULT_URL} / VOICEVOX_URL)",
+    )
+    engine_group.add_argument(
+        "--voicevox-exe", help="VOICEVOX ENGINE の run.exe(既定: 自動検出 / VOICEVOX_ENGINE_PATH)"
+    )
+    engine_group.add_argument(
+        "--no-voicevox-autostart",
+        action="store_true",
+        help="VOICEVOX ENGINE を自動で起動しない(既に起動しているものだけを使う)",
+    )
+    engine_group.add_argument(
+        "--voicevox-startup-timeout",
+        type=float,
+        default=voicevox_mod.DEFAULT_STARTUP_TIMEOUT,
+        help=f"VOICEVOX ENGINE の起動を待つ秒数(既定: {voicevox_mod.DEFAULT_STARTUP_TIMEOUT:g})",
+    )
+    engine_group.add_argument(
+        "--powershell", help="PowerShell の場所(既定: 自動検出 / POWERSHELL_PATH)"
+    )
+
     parser.add_argument(
         "--dump-script", metavar="PATH", help="ナレーション原稿を JSON で書き出す"
     )
@@ -85,7 +170,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--keep-work", action="store_true", help="合成に使った作業ファイルを残す"
     )
-    parser.add_argument("--powershell", help="PowerShell の場所(既定: 自動検出 / POWERSHELL_PATH)")
     parser.add_argument(
         "--timeout", type=float, default=600, help="合成の待ち時間(秒、既定: 600)"
     )
@@ -102,9 +186,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    voicevox_options = _voicevox_options(args)
 
     if args.check or args.list_voices:
-        return _check(args.powershell, args.engine, args.language)
+        return _check(args, voicevox_options)
     if not args.input:
         print("入力する資料(.pptx)または原稿(.json)を指定してください。", file=sys.stderr)
         return EXIT_USAGE
@@ -112,20 +197,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"入力ファイルが見つかりません: {args.input}", file=sys.stderr)
         return EXIT_USAGE
 
-    outdir = args.outdir or os.path.splitext(os.path.abspath(args.input))[0] + "_audio"
-    options = AudioOptions(
-        engine=args.engine,
-        voice=args.voice,
-        language=args.language,
-        speed=args.speed,
-        volume=args.volume,
-        sample_rate=args.sample_rate,
-        tail_silence=args.tail_silence,
-        silent_duration=args.silence,
-        prefix=args.prefix,
-        digits=args.digits,
-    )
+    try:
+        options = _audio_options(args)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_USAGE
 
+    outdir = args.outdir or os.path.splitext(os.path.abspath(args.input))[0] + "_audio"
     if args.script_only:
         return _dump_script(args, outdir)
 
@@ -139,6 +217,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             outdir,
             options=options,
             powershell=args.powershell,
+            voicevox_options=voicevox_options,
             force=args.force,
             keep_work=args.keep_work,
             timeout=args.timeout,
@@ -165,6 +244,44 @@ def main(argv: Optional[List[str]] = None) -> int:
     return EXIT_OK
 
 
+def _voicevox_options(args) -> dict:
+    return {
+        "url": args.voicevox_url,
+        "exe": args.voicevox_exe,
+        "autostart": not args.no_voicevox_autostart,
+        "startup_timeout": args.voicevox_startup_timeout,
+        "on_startup": None if args.quiet else lambda message: print(message),
+    }
+
+
+def _audio_options(args) -> AudioOptions:
+    dictionary = load_dictionary(args.dict) if args.dict else {}
+    return AudioOptions(
+        engine=args.engine,
+        voice=args.voice,
+        language=args.language,
+        speed=args.speed,
+        pitch=args.pitch,
+        intonation=args.intonation,
+        volume=args.volume,
+        sample_rate=args.sample_rate,
+        reading=ReadingStyle(
+            sentence_pause=args.sentence_pause,
+            line_pause=args.line_pause,
+            lead_silence=args.lead_silence,
+            tail_silence=args.tail_silence,
+            max_chars=args.max_chars,
+            drop_urls=not args.read_urls,
+            dictionary=dictionary,
+        ),
+        loudness=None if args.no_loudness else args.loudness,
+        peak_ceiling=args.peak_ceiling,
+        silent_duration=args.silence,
+        prefix=args.prefix,
+        digits=args.digits,
+    )
+
+
 def _dump_script(args, outdir: str) -> int:
     path = args.dump_script or os.path.join(outdir, SCRIPT_NAME)
     try:
@@ -188,6 +305,13 @@ def _report(result: NarrationResult, options: AudioOptions, outdir: str) -> None
         print(f"  エンジン: {result.engine} / 音声: {result.voice}")
     if result.audio_format:
         print(f"  形式: WAV {result.audio_format.describe()}")
+    if result.loudness:
+        print(
+            f"  音量: {result.loudness.result_lufs:.1f} LUFS / "
+            f"最大 {result.loudness.result_peak_dbfs:.1f} dBFS"
+            f"(合成時 {result.loudness.measured_lufs:.1f} LUFS から "
+            f"{result.loudness.gain_db:+.1f}dB)"
+        )
     print(f"  合計の長さ: {_hms(result.total_duration)}")
     print(f"  一覧: {os.path.basename(result.manifest_path)}(index はスライド番号)")
     print(f"  ffmpeg で読む場合のパターン: {ffmpeg_pattern(options)}")
@@ -195,6 +319,8 @@ def _report(result: NarrationResult, options: AudioOptions, outdir: str) -> None
         print(f"  原稿: {result.script_path}")
     if result.workdir:
         print(f"  作業ファイル: {result.workdir}")
+    if result.credit:
+        print(f"  公開する動画には次の表示が必要です: {result.credit}")
 
 
 def _hms(seconds: float) -> str:
@@ -202,49 +328,82 @@ def _hms(seconds: float) -> str:
     return f"{total // 60}分{total % 60:02d}秒"
 
 
-def _check(powershell: Optional[str], engine: str, language: str) -> int:
+def _check(args, voicevox_options: dict) -> int:
     """音声合成に使える環境かどうかを表示する。失敗したときの切り分けに使う。"""
-    found = tts_mod.find_powershell(powershell)
-    if not found:
-        print("PowerShell: 見つかりません", file=sys.stderr)
+    targets = tts_mod.ENGINES if args.engine == tts_mod.ENGINE_AUTO else (args.engine,)
+    usable = 0
+    for name in targets:
+        if name == voicevox_mod.ENGINE_NAME:
+            usable += _check_voicevox(args, voicevox_options)
+        else:
+            usable += _check_windows(name, args.powershell, args.language)
+    if not usable:
         print(
-            "  Windows PowerShell が必要です。--powershell か環境変数 POWERSHELL_PATH "
-            "で場所を指定してください。",
+            "使える音声合成がありません。VOICEVOX を入れるか、Windows に日本語の音声を"
+            "追加してください。",
             file=sys.stderr,
         )
         return EXIT_NO_ENGINE
-
-    print(f"PowerShell: {found}")
-    print(f"合成スクリプト: {tts_mod.script_path()}")
-
-    targets = tts_mod.ENGINES if engine == tts_mod.ENGINE_AUTO else (engine,)
-    usable = 0
-    for name in targets:
-        try:
-            speech_engine = tts_mod.SpeechEngine(name, powershell)
-            voices = speech_engine.list_voices()
-        except tts_mod.SpeechError as exc:
-            print(f"{name}: 使えません", file=sys.stderr)
-            print("\n".join("  " + line for line in str(exc).splitlines()), file=sys.stderr)
-            continue
-        matched = [v for v in voices if v.speaks(language)]
-        print(f"{name}: 使えます(音声 {len(voices)} 種類 / {language} は {len(matched)} 種類)")
-        for voice in voices:
-            mark = "*" if voice in matched else " "
-            print(f"  {mark} {voice.describe()}")
-        if matched:
-            usable += 1
-        else:
-            print(
-                f"  {language} の音声がありません。Windows の設定 > 時刻と言語 > 言語と地域 "
-                "から音声を追加できます。",
-                file=sys.stderr,
-            )
-
-    if not usable:
-        return EXIT_NO_ENGINE
-    print(f"(* が {language} の音声。--voice で名前を指定できます)")
     return EXIT_OK
+
+
+def _check_voicevox(args, voicevox_options: dict) -> int:
+    exe = voicevox_mod.find_engine_exe(args.voicevox_exe)
+    url = voicevox_options["url"] or os.environ.get("VOICEVOX_URL") or voicevox_mod.DEFAULT_URL
+    engine = voicevox_mod.VoicevoxEngine(**voicevox_options)
+    try:
+        version = engine.ensure_ready()
+        styles = engine.list_styles()
+    except tts_mod.SpeechError as exc:
+        print(f"voicevox: 使えません({url})", file=sys.stderr)
+        print("\n".join("  " + line for line in str(exc).splitlines()), file=sys.stderr)
+        return 0
+    finally:
+        engine.close()
+
+    talk = [s for s in styles if s.kind == "talk"]
+    print(f"voicevox: 使えます(ENGINE {version} / {url} / 音声 {len(talk)} 種類)")
+    if exe:
+        print(f"  実行ファイル: {exe}")
+    default = engine.pick_style()
+    print(f"  既定の音声: {default.name}(公開時の表示: {default.credit})")
+    if args.list_voices:
+        for style in talk:
+            mark = "*" if style.name == default.name else " "
+            print(f"  {mark} {style.name}(id={style.id})")
+    else:
+        print("  (--list-voices で音声の一覧を表示します)")
+    return 1
+
+
+def _check_windows(name: str, powershell: Optional[str], language: str) -> int:
+    found = tts_mod.find_powershell(powershell)
+    if not found:
+        print(f"{name}: 使えません(PowerShell が見つかりません)", file=sys.stderr)
+        return 0
+    try:
+        engine = tts_mod.SpeechEngine(name, powershell)
+        voices = engine.list_voices()
+    except tts_mod.SpeechError as exc:
+        print(f"{name}: 使えません", file=sys.stderr)
+        print("\n".join("  " + line for line in str(exc).splitlines()), file=sys.stderr)
+        return 0
+
+    matched = [v for v in voices if v.speaks(language)]
+    print(f"{name}: 使えます(音声 {len(voices)} 種類 / {language} は {len(matched)} 種類)")
+    print(f"  PowerShell: {found}")
+    print(f"  合成スクリプト: {tts_mod.script_path()}")
+    for voice in voices:
+        mark = "*" if voice in matched else " "
+        print(f"  {mark} {voice.describe()}")
+    if not matched:
+        print(
+            f"  {language} の音声がありません。Windows の設定 > 時刻と言語 > 言語と地域 "
+            "から音声を追加できます。",
+            file=sys.stderr,
+        )
+        return 0
+    return 1
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import pytest
 
 from note2slides import convert_file, export_narration, tts
 from note2slides.audio import AudioOptions
+from note2slides.reading import ReadingStyle
 
 pytestmark = pytest.mark.slow
 
@@ -30,10 +31,20 @@ title: 音声合成の確認
 
 @pytest.fixture(scope="module")
 def engine():
-    try:
-        return tts.select_engine(tts.ENGINE_AUTO, language="ja")
-    except tts.SpeechError as exc:
-        pytest.skip(f"日本語の音声合成が使えません: {exc}")
+    """Windows 標準の音声合成のうち、日本語が使える方。
+
+    VOICEVOX が入っていてもここでは使わない(この確認の目的は、VOICEVOX が
+    無い環境でも音声を出せる状態が保たれているか、なので)。
+    """
+    problems = []
+    for name in tts.WINDOWS_ENGINES:
+        try:
+            candidate = tts.SpeechEngine(name)
+            candidate.pick_voice(language="ja")
+            return candidate
+        except tts.SpeechError as exc:
+            problems.append(f"[{name}] {exc}")
+    pytest.skip("Windows の日本語音声合成が使えません:\n" + "\n".join(problems))
 
 
 def test_voices_can_be_listed(engine):
@@ -51,7 +62,7 @@ def test_article_becomes_one_audio_file_per_slide(tmp_path, engine):
     outdir = tmp_path / "audio"
 
     result = export_narration(
-        pptx_path, str(outdir), AudioOptions(tail_silence=0.3), engine=engine
+        pptx_path, str(outdir), AudioOptions(reading=ReadingStyle(tail_silence=0.3)), engine=engine
     )
 
     # スライドの枚数と音声の本数が一致し、番号も対応する。

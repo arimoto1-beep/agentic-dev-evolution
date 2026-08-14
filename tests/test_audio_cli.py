@@ -4,8 +4,19 @@ import json
 
 import pytest
 
-from note2slides import audio, audio_cli, tts
+from note2slides import audio, audio_cli, tts, voicevox
 from test_audio import FakeEngine, make_script  # 偽エンジンと原稿の組み立てを共用する
+
+
+@pytest.fixture(autouse=True)
+def without_voicevox(monkeypatch):
+    """VOICEVOX が入っている環境でも、結果が変わらないようにする。
+
+    --check は使える方式をすべて調べるため、これが無いと実行環境しだいで
+    結果が変わる。VOICEVOX を含む --check は test_check_reports_voicevox で見る。
+    """
+    monkeypatch.setattr(voicevox, "find_engine_exe", lambda explicit=None: None)
+    monkeypatch.setattr(voicevox.VoicevoxEngine, "_probe", lambda self, timeout=3.0: None)
 
 
 @pytest.fixture
@@ -197,6 +208,35 @@ def test_check_reports_a_missing_powershell(monkeypatch, capsys):
 
     assert audio_cli.main(["--check"]) == audio_cli.EXIT_NO_ENGINE
     assert "PowerShell" in capsys.readouterr().err
+
+
+def test_check_reports_voicevox(monkeypatch, capsys):
+    """VOICEVOX が使える場合は、既定の音声とクレジット表記まで示す。"""
+    styles = [
+        voicevox.Style("No.7", "アナウンス", 30),
+        voicevox.Style("ずんだもん", "ノーマル", 3),
+    ]
+    monkeypatch.setattr(voicevox.VoicevoxEngine, "_probe", lambda self, timeout=3.0: "0.25.2")
+    monkeypatch.setattr(voicevox.VoicevoxEngine, "list_styles", lambda self, refresh=False: styles)
+
+    code = audio_cli.main(["--check", "--engine", "voicevox", "--list-voices"])
+
+    out = capsys.readouterr().out
+    assert code == audio_cli.EXIT_OK
+    assert "voicevox: 使えます" in out
+    assert "0.25.2" in out
+    assert "No.7/アナウンス" in out  # ナレーション向きの声を既定に選ぶ
+    assert "VOICEVOX:No.7" in out  # 公開時に必要な表示
+    assert "ずんだもん/ノーマル" in out
+
+
+def test_check_reports_an_unreachable_voicevox(monkeypatch, capsys):
+    code = audio_cli.main(["--check", "--engine", "voicevox", "--voicevox-url", "http://127.0.0.1:1"])
+
+    assert code == audio_cli.EXIT_NO_ENGINE
+    err = capsys.readouterr().err
+    assert "voicevox: 使えません" in err
+    assert "http://127.0.0.1:1" in err
 
 
 def test_check_reports_a_missing_language(monkeypatch, capsys, tmp_path):

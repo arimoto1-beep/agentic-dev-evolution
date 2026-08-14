@@ -1,16 +1,19 @@
-"""Windows の音声合成を PowerShell 経由で呼び出す。
+"""音声合成エンジンを選び、Windows 標準の音声合成を呼び出す。
 
-PowerPoint と同じく、追加のサービスや課金を前提にしないため、Windows に最初から
-入っている音声合成をそのまま使う。呼び出しは同梱の `speech.ps1` に任せ、
-Python 側は「何を読み上げて、どこに WAV を書くか」だけを渡す。
+利用できるエンジンは 3 つ。auto はこの順で試す。
 
-エンジンは 2 つある。どちらも Windows の標準機能で、オフラインで動く。
+    voicevox  VOICEVOX ENGINE(ニューラル音声合成。実装は voicevox.py)
+    onecore   Windows.Media.SpeechSynthesis(Ayumi / Haruka / Ichiro など)
+    sapi      System.Speech(Haruka Desktop など。出力形式を指定できる)
 
-    onecore  Windows.Media.SpeechSynthesis(Ayumi / Haruka / Ichiro / Sayaka など)
-    sapi     System.Speech(Haruka Desktop など。出力形式を指定できる)
+voicevox を先に試すのは、eラーニング動画のナレーションとして数分以上聞き続けられる
+のが現状これだけのため。Windows 標準の 2 つは、VOICEVOX が入っていない環境でも
+とにかく音声を出せるようにするための控えとして残している。
 
-1 回の呼び出しで全スライド分をまとめて合成する。PowerShell の起動は 1 回で済み、
-1 件ごとに成否が返るので、失敗したスライドだけを特定できる。
+Windows 標準の音声合成の呼び出しは同梱の `speech.ps1` に任せ、Python 側は
+「何を読み上げて、どこに WAV を書くか」だけを渡す。1 回の呼び出しで全件を
+まとめて合成するので PowerShell の起動は 1 回で済み、1 件ごとに成否が返るため、
+失敗した箇所だけを特定できる。
 """
 
 from __future__ import annotations
@@ -20,13 +23,42 @@ import math
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Sequence
 
-from .proc import CommandError, decode_output, format_command
+from . import voicevox as voicevox_mod
+from .proc import decode_output, format_command
+from .speech import (
+    AudioFormat,
+    SpeechError,
+    SpeechFailure,
+    SpeechJob,
+    SpeechNotAvailableError,
+    SynthesisError,
+    SynthesisReport,
+    Voice,
+)
+from .voicevox import VoicevoxEngine
 
+__all__ = [
+    "AudioFormat",
+    "ENGINES",
+    "ENGINE_AUTO",
+    "SpeechEngine",
+    "SpeechError",
+    "SpeechFailure",
+    "SpeechJob",
+    "SpeechNotAvailableError",
+    "SynthesisError",
+    "SynthesisReport",
+    "Voice",
+    "VoicevoxEngine",
+    "select_engine",
+]
+
+#: Windows に最初から入っている音声合成。
+WINDOWS_ENGINES = ("onecore", "sapi")
 #: 利用できるエンジン。auto はこの順で試す。
-ENGINES = ("onecore", "sapi")
+ENGINES = (voicevox_mod.ENGINE_NAME,) + WINDOWS_ENGINES
 ENGINE_AUTO = "auto"
 
 #: OneCore は出力形式を指定できず、この形式で返ってくる。
@@ -52,104 +84,6 @@ _INSTALL_HINT = (
     "Windows PowerShell(powershell.exe)が必要です。"
     "場所を --powershell または環境変数 POWERSHELL_PATH で指定できます。"
 )
-
-
-class SpeechError(RuntimeError):
-    """音声合成に関する失敗。"""
-
-
-class SpeechNotAvailableError(SpeechError):
-    """音声合成そのものが使えない場合(PowerShell やエンジン、音声が無い)。"""
-
-
-class SynthesisError(CommandError, SpeechError):
-    """合成の実行が失敗した場合。実行したコマンドと出力を保持する。"""
-
-    def __init__(
-        self,
-        reason: str,
-        command: List[str],
-        returncode: Optional[int] = None,
-        stdout: str = "",
-        stderr: str = "",
-    ) -> None:
-        super().__init__(
-            reason,
-            command,
-            returncode=returncode,
-            stdout=stdout,
-            stderr=stderr,
-            hint="PowerShell は何も出力していません。",
-        )
-
-
-@dataclass(frozen=True)
-class Voice:
-    name: str
-    language: str = ""
-    gender: str = ""
-    engine: str = ""
-
-    def speaks(self, language: str) -> bool:
-        """指定した言語(`ja` や `ja-JP`)の音声かどうか。"""
-        if not language:
-            return True
-        return self.language.lower().startswith(language.lower().split("-")[0])
-
-    def describe(self) -> str:
-        parts = [self.name]
-        if self.language:
-            parts.append(self.language)
-        if self.gender:
-            parts.append(self.gender)
-        return " / ".join(parts)
-
-
-@dataclass(frozen=True)
-class AudioFormat:
-    """WAV の形式。動画側で音声をつなぐときに揃っている必要がある。"""
-
-    sample_rate: int
-    channels: int = 1
-    sample_width: int = 2  # バイト数(2 = 16bit)
-
-    def describe(self) -> str:
-        return f"{self.sample_rate}Hz / {self.sample_width * 8}bit / {'モノラル' if self.channels == 1 else f'{self.channels}ch'}"
-
-    def to_dict(self) -> dict:
-        return {
-            "sample_rate": self.sample_rate,
-            "channels": self.channels,
-            "sample_width": self.sample_width,
-        }
-
-
-@dataclass
-class SpeechJob:
-    """1 件の読み上げ。index は原稿(=スライド)の番号。"""
-
-    index: int
-    text: str
-    out_path: str
-
-
-@dataclass
-class SpeechFailure:
-    index: int
-    message: str
-
-
-@dataclass
-class SynthesisReport:
-    voice: str = ""
-    failures: List[SpeechFailure] = field(default_factory=list)
-    command: List[str] = field(default_factory=list)
-    stdout: str = ""
-    stderr: str = ""
-
-    @property
-    def ok(self) -> bool:
-        return not self.failures
 
 
 # ---------------------------------------------------------------------------
@@ -193,12 +127,15 @@ class SpeechEngine:
     """`speech.ps1` を通して Windows の音声合成を使う。"""
 
     def __init__(self, name: str, powershell: Optional[str] = None) -> None:
-        if name not in ENGINES:
-            known = " / ".join(ENGINES)
+        if name not in WINDOWS_ENGINES:
+            known = " / ".join(WINDOWS_ENGINES)
             raise SpeechNotAvailableError(f"未知のエンジンです: {name}(利用できるのは {known})")
         self.name = name
         self.powershell = require_powershell(powershell)
         self._voices: Optional[List[Voice]] = None
+
+    def close(self) -> None:
+        """後始末。PowerShell は 1 回ごとに起動して終わるので何もしない。"""
 
     # -- 情報 -----------------------------------------------------------
     def default_format(self, sample_rate: Optional[int] = None) -> AudioFormat:
@@ -276,11 +213,14 @@ class SpeechEngine:
         sample_rate: Optional[int] = None,
         timeout: float = 600,
         on_done: Optional[Callable[[int], None]] = None,
+        pitch: float = 0.0,
+        intonation: float = 1.0,
     ) -> SynthesisReport:
         """まとめて合成する。失敗した件は report.failures に入れて返す。
 
-        1 件の失敗で全体を止めない。どのスライドが失敗したかを一度に見せた方が
-        原因を追いやすいため。
+        1 件の失敗で全体を止めない。どこが失敗したかを一度に見せた方が原因を
+        追いやすいため。pitch と intonation は VOICEVOX 用の指定で、Windows
+        標準の音声合成では変えられないため受け取るだけで使わない。
         """
         report = SynthesisReport(voice=voice or "")
         if not jobs:
@@ -442,36 +382,58 @@ def sapi_rate(speed: float) -> int:
     return max(-10, min(10, round(math.log(speed, 1.4))))
 
 
+def create_engine(
+    name: str,
+    powershell: Optional[str] = None,
+    voicevox_options: Optional[dict] = None,
+):
+    """名前を指定してエンジンを 1 つ作る(接続や音声の確認はしない)。"""
+    if name == voicevox_mod.ENGINE_NAME:
+        return VoicevoxEngine(**(voicevox_options or {}))
+    return SpeechEngine(name, powershell)
+
+
 def select_engine(
     name: str = ENGINE_AUTO,
     powershell: Optional[str] = None,
     language: str = "ja",
-) -> SpeechEngine:
-    """使うエンジンを決める。auto なら、指定言語の音声があるものを順に探す。"""
+    voicevox_options: Optional[dict] = None,
+):
+    """使うエンジンを決める。
+
+    auto なら ENGINES の順に試し、実際にその言語の音声を選べたものを返す。
+    VOICEVOX を先に試すのは、ナレーションとして聞ける品質になるのが現状
+    これだけのため。見つからない場合は、どのエンジンがなぜ使えなかったかを
+    すべて並べて返す(1 つだけ挙げても原因の切り分けにならない)。
+    """
     if name != ENGINE_AUTO:
-        return SpeechEngine(name, powershell)
+        return create_engine(name, powershell, voicevox_options)
 
     problems = []
     for candidate in ENGINES:
+        engine = None
         try:
-            engine = SpeechEngine(candidate, powershell)
+            engine = create_engine(candidate, powershell, voicevox_options)
             engine.pick_voice(language=language)
             return engine
-        except SpeechNotAvailableError as exc:
-            problems.append(f"[{candidate}] {exc}")
         except SpeechError as exc:
+            if engine is not None:
+                engine.close()
             problems.append(f"[{candidate}] {exc}")
-    detail = "\n".join(problems)
+    detail = "\n\n".join(problems)
     raise SpeechNotAvailableError(
-        f"{language} の音声合成が使えるエンジンが見つかりませんでした。\n{detail}"
+        f"{language} の音声合成が使えるエンジンが見つかりませんでした。\n\n{detail}"
     )
 
 
 def available_engines(powershell: Optional[str] = None) -> List[str]:
-    """PowerShell が使える環境かどうかだけを見て、候補を返す。"""
-    if not find_powershell(powershell):
-        return []
-    return list(ENGINES)
+    """それぞれのエンジンが使えそうかを、起動せずに分かる範囲で判定する。"""
+    names = []
+    if voicevox_mod.is_installed():
+        names.append(voicevox_mod.ENGINE_NAME)
+    if find_powershell(powershell):
+        names.extend(WINDOWS_ENGINES)
+    return names
 
 
 def script_path() -> str:

@@ -35,6 +35,10 @@ SOURCE_NONE = "none"
 #: 聞き取れないため、ノートが無ければ無音にする。
 SKIP_SHAPE_PREFIXES = ("code",)
 
+#: 1 枚に収まらないスライドのタイトルに planner が付ける目印。画面を見れば
+#: 続きだと分かるので、読み上げからは外す(「かっこ つづき」と読まれてしまう)。
+CONTINUATION_SUFFIX = "（続き）"
+
 SCRIPT_SUFFIXES = (".json",)
 PRESENTATION_SUFFIXES = (".pptx",)
 
@@ -204,6 +208,7 @@ def extract_script(source: str) -> NarrationScript:
 def _segment_of(slide, number: int) -> NarrationSegment:
     """1 枚分のセリフを決める。ノートが無い場合は画面に出ている文字を読む。"""
     title = _clean(_title_text(slide))
+    spoken_title = _spoken_title(title)
     notes = _clean(_notes_text(slide))
     if notes:
         return NarrationSegment(number, text=notes, title=title, source=SOURCE_NOTES)
@@ -211,11 +216,18 @@ def _segment_of(slide, number: int) -> NarrationSegment:
     # 表紙や章扉はタイトルだけが本文なので、タイトルも読み上げの対象にする。
     body = _clean("\n".join(_body_texts(slide)))
     if body:
-        text = f"{title}\n{body}" if title else body
+        text = f"{spoken_title}\n{body}" if spoken_title else body
         return NarrationSegment(number, text=text, title=title, source=SOURCE_BODY)
-    if title:
-        return NarrationSegment(number, text=title, title=title, source=SOURCE_TITLE)
-    return NarrationSegment(number, text="", title="", source=SOURCE_NONE)
+    if spoken_title:
+        return NarrationSegment(number, text=spoken_title, title=title, source=SOURCE_TITLE)
+    return NarrationSegment(number, text="", title=title, source=SOURCE_NONE)
+
+
+def _spoken_title(title: str) -> str:
+    """読み上げ用のタイトル。レイアウト上の目印は落とす。"""
+    if title.endswith(CONTINUATION_SUFFIX):
+        return title[: -len(CONTINUATION_SUFFIX)].strip()
+    return title
 
 
 def _title_text(slide) -> str:

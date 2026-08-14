@@ -12,6 +12,7 @@ dependencies = [
     "markdown-it-py>=3.0",
     "pypdfium2>=4.0",  # PDF をスライド画像に描画する
     "pillow>=10.0",    # 描画結果を PNG / JPEG として書き出す
+    "numpy>=1.26",     # 音声の組み立てと音量測定(ITU-R BS.1770)
 ]
 
 [project.optional-dependencies]
@@ -36,4 +37,4 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 # 一時ファイルはリポジトリ内に置き、環境によらず同じ場所を使う
 addopts = "--basetemp=build/pytest-tmp"
-markers = ["slow: 外部ツール(LibreOffice)を起動する時間のかかるテスト"]
+markers = ["slow: 外部ツール(LibreOffice / 音声合成)を起動する時間のかかるテスト"]

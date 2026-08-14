@@ -1,6 +1,7 @@
 """ナレーション原稿を音声ファイル(WAV)に合成する。
 
-    .pptx --(narration)--> 原稿 --(tts)--> narration_001.wav ...
+    .pptx --(narration)--> 原稿 --(reading)--> 読み上げ単位 + 間
+                                    --(tts)--> 部品 --(waveform)--> narration_001.wav ...
 
 出力はスライド画像と同じ規則で番号を振る。`slide_001.png` に対応する音声は
 `narration_001.wav` で、番号だけでスライドと音声の対応が分かる。
@@ -11,6 +12,14 @@
       ...
       narration.json   スライド番号・長さ・読み上げた文章の一覧
 
+合成エンジンに 1 枚分の文章をまとめて渡さず、文ごとに分けて合成してから
+つないでいるのは、文と文の間を自分で決めるため。エンジン任せだと間が詰まって
+早口に聞こえ、長時間のナレーションに耐えない。間の長さは `reading.py` が決める。
+
+つないだあと、全ファイルに同じ音量補正をかける。ファイルごとにそろえると、
+静かなスライドだけが持ち上がってスライドごとに音量が動いて聞こえるため、
+全体を 1 本の動画として測り、同じ補正値をかける(`waveform.py`)。
+
 読み上げる文章が無いスライドも、番号がずれないように無音の WAV を書き出す。
 形式は全ファイルで揃える(動画生成でつなぐときに揃っている必要がある)。
 """
@@ -18,24 +27,32 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
 import tempfile
-import wave
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional
 
 from . import narration as narration_mod
 from . import tts as tts_mod
-from .narration import NarrationScript, NarrationSegment
-from .tts import AudioFormat, SpeechEngine, SpeechJob
+from . import waveform as wave_mod
+from .narration import NarrationScript
+from .reading import ReadingPlan, ReadingStyle, plan_reading
+from .speech import AudioFormat, SpeechJob
+from .waveform import LoudnessAdjustment, Waveform
 
 MANIFEST_NAME = "narration.json"
 SCRIPT_NAME = "script.json"
 
-#: 合成しない(無音にする)場合の既定の形式。
-DEFAULT_SAMPLE_RATE = tts_mod.SAPI_SAMPLE_RATE
+#: 出力する標本化周波数。動画の音声トラックに合わせる。
+DEFAULT_SAMPLE_RATE = 48000
+#: 目標の音量(LUFS)。YouTube は約 -14 LUFS を基準に音量をそろえるため、
+#: あとから BGM を足す余地を 2dB 残した値にしている。
+DEFAULT_LOUDNESS_LUFS = -16.0
+#: 音割れを避ける上限(dBFS)。
+DEFAULT_PEAK_CEILING_DBFS = -1.5
 
 
 class AudioExportError(RuntimeError):
@@ -54,9 +71,13 @@ class AudioOptions:
     voice: Optional[str] = None
     language: str = "ja"
     speed: float = 1.0  # 1.0 が標準の速さ
+    pitch: float = 0.0  # 声の高さ(voicevox のみ)
+    intonation: float = 1.0  # 抑揚の強さ(voicevox のみ)
     volume: int = 100
-    sample_rate: Optional[int] = None  # 指定できるのは sapi エンジンのみ
-    tail_silence: float = 0.5  # 各スライドの読み上げ後に足す無音(秒)
+    sample_rate: int = DEFAULT_SAMPLE_RATE
+    reading: ReadingStyle = field(default_factory=ReadingStyle)
+    loudness: Optional[float] = DEFAULT_LOUDNESS_LUFS  # None で音量補正をしない
+    peak_ceiling: float = DEFAULT_PEAK_CEILING_DBFS
     silent_duration: float = 2.0  # 読み上げる文章が無いスライドの長さ(秒)
     prefix: str = "narration_"
     digits: int = 3
@@ -69,12 +90,18 @@ class AudioOptions:
             raise AudioExportError(f"読み上げ速度は 0 より大きくしてください: {self.speed}")
         if not 0 <= self.volume <= 100:
             raise AudioExportError(f"音量は 0〜100 で指定してください: {self.volume}")
-        if self.tail_silence < 0 or self.silent_duration < 0:
+        if self.silent_duration < 0:
             raise AudioExportError("無音の長さは 0 以上にしてください")
-        if self.sample_rate is not None and self.sample_rate < 8000:
+        if self.sample_rate < 8000:
             raise AudioExportError(f"標本化周波数が小さすぎます: {self.sample_rate}")
         if self.digits < 1:
             raise AudioExportError("連番の桁数は 1 以上にしてください")
+        if self.loudness is not None and not -60 <= self.loudness <= 0:
+            raise AudioExportError(f"目標の音量は -60〜0 LUFS で指定してください: {self.loudness}")
+        try:
+            self.reading.validate()
+        except ValueError as exc:
+            raise AudioExportError(str(exc)) from exc
 
 
 @dataclass
@@ -84,23 +111,34 @@ class NarrationClip:
     index: int
     path: str
     duration: float
-    text: str = ""
+    text: str = ""  # 原稿の文章(元の記事の文言のまま)
+    reading: str = ""  # 実際に合成へ渡した文字列
     source: str = narration_mod.SOURCE_NONE
     silent: bool = False
+    utterances: int = 0  # いくつに分けて読み上げたか
+    lufs: Optional[float] = None  # このファイルの音量(補正後)
+    notes: List[str] = field(default_factory=list)  # 読み上げ用に整形した内容
 
     @property
     def filename(self) -> str:
         return os.path.basename(self.path)
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "index": self.index,
             "file": self.filename,
             "duration": round(self.duration, 3),
             "source": self.source,
             "silent": self.silent,
+            "utterances": self.utterances,
             "text": self.text,
+            "reading": self.reading,
         }
+        if self.lufs is not None and self.lufs != -math.inf:
+            data["lufs"] = round(self.lufs, 2)
+        if self.notes:
+            data["notes"] = self.notes
+        return data
 
 
 @dataclass
@@ -110,7 +148,9 @@ class NarrationResult:
     source: str = ""
     engine: str = ""
     voice: str = ""
+    credit: str = ""  # 公開時に表示が必要なクレジット表記
     audio_format: Optional[AudioFormat] = None
+    loudness: Optional[LoudnessAdjustment] = None
     manifest_path: Optional[str] = None
     script_path: Optional[str] = None
     workdir: Optional[str] = None  # 調査用に残した作業ディレクトリ
@@ -129,8 +169,9 @@ def export_narration(
     source: str,
     outdir: str,
     options: Optional[AudioOptions] = None,
-    engine: Optional[SpeechEngine] = None,
+    engine=None,
     powershell: Optional[str] = None,
+    voicevox_options: Optional[dict] = None,
     force: bool = False,
     keep_work: bool = False,
     timeout: float = 600,
@@ -147,6 +188,7 @@ def export_narration(
         source=os.path.abspath(source),
         warnings=list(script.warnings),
     )
+    plans = {s.index: plan_reading(s.text, options.reading) for s in script.segments}
 
     os.makedirs(outdir, exist_ok=True)
     if dump_script:
@@ -160,21 +202,22 @@ def export_narration(
             "上書きする場合は --force を付けてください。"
         )
 
-    if any(not segment.is_empty for segment in script.segments):
-        engine = engine or tts_mod.select_engine(options.engine, powershell, options.language)
-        voice = engine.pick_voice(options.voice, options.language)
-        result.engine = engine.name
-        result.voice = voice.name
-        if options.sample_rate and not engine.honors_sample_rate():
-            result.warnings.append(
-                f"{engine.name} は出力形式を選べないため、--sample-rate は使いません"
-                f"({engine.default_format().describe()} で出力します)。"
+    owns_engine = engine is None
+    try:
+        if any(not plan.is_empty for plan in plans.values()):
+            if engine is None:
+                engine = tts_mod.select_engine(
+                    options.engine, powershell, options.language, voicevox_options
+                )
+            _synthesize(
+                script, plans, outdir, options, engine, timeout, keep_work, result, on_progress
             )
-        _synthesize(script, outdir, options, engine, voice.name, timeout, keep_work, result, on_progress)
-    else:
-        result.warnings.append("読み上げる文章がありません。すべて無音として書き出します。")
-
-    _finish_clips(script, outdir, options, result, on_progress)
+        else:
+            result.warnings.append("読み上げる文章がありません。すべて無音として書き出します。")
+            _assemble(script, plans, {}, outdir, options, result, on_progress)
+    finally:
+        if owns_engine and engine is not None:
+            engine.close()
 
     stale = sorted(set(existing) - {clip.path for clip in result.clips})
     for path in stale:
@@ -193,53 +236,104 @@ def export_narration(
 
 def _synthesize(
     script: NarrationScript,
+    plans: Dict[int, ReadingPlan],
     outdir: str,
     options: AudioOptions,
-    engine: SpeechEngine,
-    voice: str,
+    engine,
     timeout: float,
     keep_work: bool,
     result: NarrationResult,
     on_progress: Optional[Callable[[int], None]],
 ) -> None:
-    jobs = [
-        SpeechJob(segment.index, segment.text, os.path.join(outdir, options.filename(segment.index)))
-        for segment in script.segments
-        if not segment.is_empty
-    ]
-    # 作業ディレクトリ(読み上げた文章と合成の指示)は、成功したときだけ消す。
-    # 失敗したときは残して、同じコマンドを手元で再実行できるようにする。
+    """読み上げ単位ごとに合成し、つないで 1 枚分の音声にする。"""
+    voice = engine.pick_voice(options.voice, options.language)
+    result.engine = engine.name
+    result.voice = voice.name
+    if options.sample_rate and not engine.honors_sample_rate():
+        result.warnings.append(
+            f"{engine.name} は出力形式を選べないため、"
+            f"{engine.default_format().describe()} で合成してから "
+            f"{options.sample_rate}Hz に変換します(音質は元の形式のままです)。"
+        )
+
     workdir = tempfile.mkdtemp(prefix="note2slides-tts-")
+
+    jobs: List[SpeechJob] = []
+    owner: Dict[int, int] = {}  # 合成単位の通し番号 -> スライド番号
+    parts: Dict[tuple, str] = {}  # (スライド番号, 何番目の読み上げ単位か) -> WAV
+    for segment in script.segments:
+        plan = plans[segment.index]
+        for position, utterance in enumerate(plan.utterances):
+            job_index = len(jobs) + 1
+            out_path = os.path.join(workdir, f"part_{job_index:04d}.wav")
+            jobs.append(
+                SpeechJob(
+                    index=job_index,
+                    text=utterance.text,
+                    out_path=out_path,
+                    slide=segment.index,
+                )
+            )
+            owner[job_index] = segment.index
+            parts[(segment.index, position)] = out_path
+
+    # 1 枚分がすべて終わってから進捗を出す(スライド単位で見た方が分かりやすい)。
+    remaining = {index: 0 for index in plans}
+    for job in jobs:
+        remaining[job.slide] += 1
+
+    def on_done(job_index: int) -> None:
+        slide = owner.get(job_index)
+        if slide is None:
+            return
+        remaining[slide] -= 1
+        if remaining[slide] == 0 and on_progress:
+            on_progress(slide)
+
     report = engine.synthesize(
         jobs,
         workdir,
-        voice=voice,
+        voice=voice.name,
         speed=options.speed,
         volume=options.volume,
         sample_rate=options.sample_rate,
         timeout=timeout,
-        on_done=on_progress,
+        on_done=on_done,
+        pitch=options.pitch,
+        intonation=options.intonation,
     )
     if report.voice:
         result.voice = report.voice
+    result.credit = _credit_of(engine, result.voice)
 
     if report.failures:
         result.workdir = workdir
-        raise AudioExportError(_failure_message(report, workdir, script))
+        raise AudioExportError(_failure_message(report, workdir, script, owner))
+
+    _assemble(script, plans, parts, outdir, options, result, on_progress)
+
+    # 作業ディレクトリ(合成した部品と合成の指示)は、成功したときだけ消す。
+    # 失敗したときは残して、同じ内容を手元で再実行できるようにする。
     if keep_work:
         result.workdir = workdir
     else:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _failure_message(report, workdir: str, script: NarrationScript) -> str:
-    lines = [f"{len(report.failures)} 枚分の音声を合成できませんでした。"]
+def _credit_of(engine, voice: str) -> str:
+    getter = getattr(engine, "credit_for", None)
+    return getter(voice) if callable(getter) else ""
+
+
+def _failure_message(report, workdir: str, script: NarrationScript, owner: Dict[int, int]) -> str:
     titles = {s.index: s.title for s in script.segments}
+    slides = sorted({owner.get(f.index, 0) for f in report.failures})
+    lines = [f"{len(slides)} 枚分の音声を合成できませんでした。"]
     for failure in report.failures:
-        title = titles.get(failure.index) or ""
-        head = f"  スライド {failure.index}"
-        if title:
-            head += f"（{title}）"
+        slide = owner.get(failure.index, 0)
+        head = f"  スライド {slide}"
+        if titles.get(slide):
+            head += f"（{titles[slide]}）"
         lines.append(f"{head}: {failure.message}")
     lines.append("")
     lines.append("実行したコマンド:")
@@ -251,127 +345,107 @@ def _failure_message(report, workdir: str, script: NarrationScript) -> str:
     return "\n".join(lines)
 
 
-def _finish_clips(
+# ---------------------------------------------------------------------------
+# 組み立て
+# ---------------------------------------------------------------------------
+
+
+def _assemble(
     script: NarrationScript,
+    plans: Dict[int, ReadingPlan],
+    parts: Dict[tuple, str],
     outdir: str,
     options: AudioOptions,
     result: NarrationResult,
     on_progress: Optional[Callable[[int], None]],
 ) -> None:
-    """合成結果を整え、無音スライドを補い、形式と長さを確かめる。"""
-    formats: List[AudioFormat] = []
-    clips: List[NarrationClip] = []
-    silent_segments: List[NarrationSegment] = []
+    """合成した部品を間を置いてつなぎ、音量をそろえて書き出す。
+
+    parts は (スライド番号, 何番目の読み上げ単位か) から合成済み WAV への対応。
+    """
+    rate = options.sample_rate
+    spoken: Dict[int, Waveform] = {}
 
     for segment in script.segments:
-        if segment.is_empty:
-            silent_segments.append(segment)
+        plan = plans[segment.index]
+        if plan.is_empty:
             continue
-        path = os.path.join(outdir, options.filename(segment.index))
-        if options.tail_silence:
-            _append_silence(path, options.tail_silence)
-        audio_format, duration = _wav_info(path)
-        formats.append(audio_format)
-        clips.append(
-            NarrationClip(
-                index=segment.index,
-                path=os.path.abspath(path),
-                duration=duration,
-                text=segment.text,
-                source=segment.source,
-            )
-        )
+        pieces: List[Waveform] = [wave_mod.silence(plan.lead_silence, rate)]
+        for position, utterance in enumerate(plan.utterances):
+            piece = wave_mod.read_wav(parts[(segment.index, position)])
+            if piece.sample_rate != rate:
+                piece = wave_mod.resample(piece, rate)
+            # エンジンが付ける前後の余白は長さがまちまちなので、いったん削って
+            # こちらで決めた長さの無音を入れ直す。
+            pieces.append(wave_mod.fade(wave_mod.trim_silence(piece)))
+            pieces.append(wave_mod.silence(utterance.pause_after, rate))
+        spoken[segment.index] = wave_mod.concat(pieces, rate)
 
-    audio_format = _common_format(formats, options, result)
-    result.audio_format = audio_format
+    spoken = _adjust_loudness(spoken, options, result)
 
-    for segment in silent_segments:
+    clips: List[NarrationClip] = []
+    for segment in script.segments:
+        plan = plans[segment.index]
         path = os.path.join(outdir, options.filename(segment.index))
-        _write_silence(path, options.silent_duration, audio_format)
-        clips.append(
-            NarrationClip(
-                index=segment.index,
-                path=os.path.abspath(path),
-                duration=options.silent_duration,
-                text="",
-                source=segment.source,
-                silent=True,
+        if segment.index in spoken:
+            audio = spoken[segment.index]
+            wave_mod.write_wav(path, audio)
+            clips.append(
+                NarrationClip(
+                    index=segment.index,
+                    path=os.path.abspath(path),
+                    duration=audio.duration,
+                    text=segment.text,
+                    reading=plan.reading,
+                    source=segment.source,
+                    utterances=len(plan.utterances),
+                    lufs=wave_mod.loudness_lufs(audio),
+                    notes=plan.notes,
+                )
             )
-        )
-        if on_progress:
-            on_progress(segment.index)
+        else:
+            wave_mod.write_wav(path, wave_mod.silence(options.silent_duration, rate))
+            clips.append(
+                NarrationClip(
+                    index=segment.index,
+                    path=os.path.abspath(path),
+                    duration=options.silent_duration,
+                    text=segment.text,
+                    source=segment.source,
+                    silent=True,
+                    notes=plan.notes,
+                )
+            )
+            if on_progress:
+                on_progress(segment.index)
 
     result.clips = sorted(clips, key=lambda clip: clip.index)
+    result.audio_format = AudioFormat(rate, 1, wave_mod.SAMPLE_WIDTH)
 
 
-def _common_format(
-    formats: List[AudioFormat], options: AudioOptions, result: NarrationResult
-) -> AudioFormat:
-    """全ファイルの形式。揃っていない場合は警告して先頭に合わせる。"""
-    if not formats:
-        return AudioFormat(options.sample_rate or DEFAULT_SAMPLE_RATE)
-    if len(set(formats)) > 1:
-        described = " / ".join(sorted({f.describe() for f in formats}))
+def _adjust_loudness(
+    spoken: Dict[int, Waveform], options: AudioOptions, result: NarrationResult
+) -> Dict[int, Waveform]:
+    """全ファイルに共通の音量補正をかける。"""
+    if options.loudness is None or not spoken:
+        return spoken
+
+    indexes = list(spoken)
+    adjusted, adjustment = wave_mod.normalize(
+        [spoken[index] for index in indexes], options.loudness, options.peak_ceiling
+    )
+    if adjustment.measured_lufs == -math.inf:
+        result.warnings.append("音声に音が入っていないため、音量の調整をしていません。")
+        return spoken
+
+    result.loudness = adjustment
+    if adjustment.limit_db > 6.0:
         result.warnings.append(
-            f"音声ファイルの形式が揃っていません({described})。"
-            "動画生成でつなぐ前に変換が必要です。"
+            f"飛び出したピークを最大 {adjustment.limit_db:.1f}dB 抑えました。"
+            "抑える量が大きいので、--loudness を下げるか --volume を下げて合成し直すと"
+            "自然な音になります。"
         )
-    return formats[0]
-
-
-# ---------------------------------------------------------------------------
-# WAV の読み書き
-# ---------------------------------------------------------------------------
-
-
-def _wav_info(path: str) -> Tuple[AudioFormat, float]:
-    """WAV の形式と長さ(秒)を読む。"""
-    try:
-        with wave.open(path, "rb") as reader:
-            params = reader.getparams()
-    except (wave.Error, EOFError, OSError) as exc:
-        raise AudioExportError(
-            f"音声ファイルを読み取れませんでした: {path}\n{type(exc).__name__}: {exc}"
-        ) from exc
-    if not params.framerate:
-        raise AudioExportError(f"音声ファイルの形式が不正です(標本化周波数が 0): {path}")
-    audio_format = AudioFormat(params.framerate, params.nchannels, params.sampwidth)
-    return audio_format, params.nframes / params.framerate
-
-
-def _append_silence(path: str, seconds: float) -> None:
-    """読み上げの後ろに無音を足す。スライドの切り替わりが詰まらないようにする。"""
-    if seconds <= 0:
-        return
-    try:
-        with wave.open(path, "rb") as reader:
-            params = reader.getparams()
-            frames = reader.readframes(params.nframes)
-        with wave.open(path, "wb") as writer:
-            writer.setparams(params)
-            writer.writeframes(frames + _silence_frames(seconds, params.framerate, params.nchannels, params.sampwidth))
-    except (wave.Error, EOFError, OSError) as exc:
-        raise AudioExportError(
-            f"音声ファイルに無音を足せませんでした: {path}\n{type(exc).__name__}: {exc}"
-        ) from exc
-
-
-def _write_silence(path: str, seconds: float, audio_format: AudioFormat) -> None:
-    with wave.open(path, "wb") as writer:
-        writer.setnchannels(audio_format.channels)
-        writer.setsampwidth(audio_format.sample_width)
-        writer.setframerate(audio_format.sample_rate)
-        writer.writeframes(
-            _silence_frames(
-                seconds, audio_format.sample_rate, audio_format.channels, audio_format.sample_width
-            )
-        )
-
-
-def _silence_frames(seconds: float, framerate: int, channels: int, sample_width: int) -> bytes:
-    # 8bit PCM の無音は 0x80(符号なし表現の中央)、それ以外は 0。
-    filler = b"\x80" if sample_width == 1 else b"\x00"
-    return filler * (int(round(seconds * framerate)) * channels * sample_width)
+    return dict(zip(indexes, adjusted))
 
 
 # ---------------------------------------------------------------------------
@@ -394,8 +468,11 @@ def _write_manifest(outdir: str, options: AudioOptions, result: NarrationResult)
         "source": os.path.basename(result.source),
         "engine": result.engine,
         "voice": result.voice,
+        "credit": result.credit,
         "speed": options.speed,
         "format": result.audio_format.to_dict() if result.audio_format else {},
+        "loudness": result.loudness.to_dict() if result.loudness else None,
+        "reading": options.reading.to_dict(),
         "count": result.count,
         "total_duration": round(result.total_duration, 3),
         "clips": [clip.to_dict() for clip in result.clips],

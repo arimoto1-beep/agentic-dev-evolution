@@ -10,7 +10,7 @@ import subprocess
 
 import pytest
 
-from note2slides import tts
+from note2slides import tts, voicevox
 from note2slides.tts import (
     SpeechEngine,
     SpeechJob,
@@ -18,6 +18,17 @@ from note2slides.tts import (
     SynthesisError,
     Voice,
 )
+
+
+@pytest.fixture(autouse=True)
+def without_voicevox(monkeypatch):
+    """VOICEVOX が入っている環境でも、ここでは Windows 標準の合成だけを見る。
+
+    auto の選択順に VOICEVOX が入るため、これが無いと結果が実行環境によって
+    変わってしまう。VOICEVOX 自体の確認は tests/test_voicevox.py で行う。
+    """
+    monkeypatch.setattr(voicevox, "find_engine_exe", lambda explicit=None: None)
+    monkeypatch.setattr(voicevox.VoicevoxEngine, "_probe", lambda self, timeout=3.0: None)
 
 
 @pytest.fixture
@@ -177,7 +188,8 @@ def test_auto_reports_every_engine_it_tried(fake_powershell, monkeypatch):
         tts.select_engine("auto")
 
     message = str(excinfo.value)
-    assert "[onecore]" in message and "[sapi]" in message
+    # どれか 1 つだけを挙げても切り分けにならないので、試した全部を並べる。
+    assert "[voicevox]" in message and "[onecore]" in message and "[sapi]" in message
 
 
 def test_voice_language_match():

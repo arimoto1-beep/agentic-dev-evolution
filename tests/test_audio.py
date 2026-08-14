@@ -1,13 +1,16 @@
 """ナレーション音声の書き出しを確認する。
 
-実際の音声合成は使わず、WAV を書くだけの偽エンジンで確かめる。
-実機での合成は tests/test_speech_compat.py で確認する。
+実際の音声合成は使わず、渡された文字列の長さだけ音を鳴らす偽エンジンで確かめる。
+実機での合成は tests/test_speech_compat.py(Windows 標準)と
+tests/test_voicevox_compat.py(VOICEVOX)で確認する。
 """
 
 import json
+import math
 import os
 import wave
 
+import numpy as np
 import pytest
 
 from note2slides import narration
@@ -20,18 +23,25 @@ from note2slides.audio import (
 )
 from note2slides.model import Bullet, Deck, Run, Slide
 from note2slides.model import KIND_BULLETS
+from note2slides.reading import ReadingStyle
 from note2slides.renderer import render_deck
-from note2slides.tts import AudioFormat, SpeechFailure, SynthesisReport, Voice
+from note2slides.speech import AudioFormat, SpeechFailure, SynthesisReport, Voice
+from note2slides.waveform import Waveform, loudness_lufs, read_wav
 
 SAMPLE_RATE = 22050
+#: 偽エンジンが鳴らす音の振幅。無音だと前後の切り詰めで消えてしまう。
+TONE_AMPLITUDE = 0.5
 
 
-def write_wav(path, seconds, sample_rate=SAMPLE_RATE, channels=1, width=2):
-    with wave.open(path, "wb") as writer:
-        writer.setnchannels(channels)
-        writer.setsampwidth(width)
+def write_tone(path, seconds, sample_rate=SAMPLE_RATE, amplitude=TONE_AMPLITUDE):
+    """読み上げの代わりになる、一定の大きさの音を書く。"""
+    t = np.arange(int(seconds * sample_rate)) / sample_rate
+    data = np.round(amplitude * np.sin(2 * math.pi * 440 * t) * 32767).astype("<i2")
+    with wave.open(str(path), "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
         writer.setframerate(sample_rate)
-        writer.writeframes(b"\x00" * (int(seconds * sample_rate) * channels * width))
+        writer.writeframes(data.tobytes())
 
 
 def duration_of(path):
@@ -40,14 +50,16 @@ def duration_of(path):
 
 
 class FakeEngine:
-    """読み上げの代わりに、文字数に比例した長さの WAV を書くエンジン。"""
+    """読み上げの代わりに、文字数に比例した長さの音を書くエンジン。"""
 
-    def __init__(self, name="fake", fail=(), sample_rate=SAMPLE_RATE, honors=True):
+    def __init__(self, name="fake", fail=(), sample_rate=SAMPLE_RATE, honors=True, amplitude=TONE_AMPLITUDE):
         self.name = name
         self.fail = set(fail)
         self.sample_rate = sample_rate
         self.honors = honors
+        self.amplitude = amplitude
         self.calls = []
+        self.closed = False
 
     def pick_voice(self, name=None, language="ja"):
         return Voice(name or "偽の音声", "ja-JP", engine=self.name)
@@ -58,14 +70,26 @@ class FakeEngine:
     def default_format(self, sample_rate=None):
         return AudioFormat(sample_rate or self.sample_rate)
 
+    def close(self):
+        self.closed = True
+
     def synthesize(self, jobs, workdir, on_done=None, **kwargs):
         self.calls.append({"jobs": list(jobs), "workdir": workdir, **kwargs})
-        report = SynthesisReport(voice=kwargs.get("voice", ""), command=["fake", "-JobFile", "job.json"])
+        rate = kwargs.get("sample_rate") if self.honors else None
+        report = SynthesisReport(
+            voice=kwargs.get("voice", ""), command=["fake", "-JobFile", "job.json"]
+        )
         for job in jobs:
             if job.index in self.fail:
                 report.failures.append(SpeechFailure(job.index, "偽の失敗"))
                 continue
-            write_wav(job.out_path, 0.1 * len(job.text), self.sample_rate)
+            # 音量測定の区間(400ms)より短いと音量をそろえられないので下限を置く。
+            write_tone(
+                job.out_path,
+                max(0.6, 0.1 * len(job.text)),
+                rate or self.sample_rate,
+                self.amplitude,
+            )
             if on_done:
                 on_done(job.index)
         return report
@@ -98,6 +122,11 @@ def make_pptx(tmp_path, notes, name="deck.pptx"):
     path = str(tmp_path / name)
     render_deck(Deck(slides=slides), path)
     return path
+
+
+def manifest_of(outdir):
+    with open(os.path.join(str(outdir), "narration.json"), encoding="utf-8") as f:
+        return json.load(f)
 
 
 # ---------------------------------------------------------------------------
@@ -148,35 +177,36 @@ def test_silent_slide_still_gets_a_file(tmp_path):
     assert not result.clips[0].silent
 
 
-def test_tail_silence_is_added(tmp_path):
-    source = make_script(tmp_path, ["あいうえお"])
-    outdir = tmp_path / "audio"
-
-    without = export_narration(
-        source, str(outdir), AudioOptions(tail_silence=0), engine=FakeEngine()
-    )
-    base = without.clips[0].duration
-
-    with_tail = export_narration(
-        source, str(outdir), AudioOptions(tail_silence=0.5), engine=FakeEngine(), force=True
-    )
-
-    assert with_tail.clips[0].duration == pytest.approx(base + 0.5, abs=0.01)
-    assert duration_of(outdir / "narration_001.wav") == pytest.approx(base + 0.5, abs=0.01)
-
-
 def test_all_files_share_one_format(tmp_path):
     source = make_script(tmp_path, ["読み上げ", "", "読み上げ 2"])
     outdir = tmp_path / "audio"
 
     result = export_narration(source, str(outdir), engine=FakeEngine())
 
-    assert result.audio_format == AudioFormat(SAMPLE_RATE, 1, 2)
+    assert result.audio_format == AudioFormat(48000, 1, 2)
     formats = set()
     for path in outdir.glob("*.wav"):
         with wave.open(str(path), "rb") as reader:
             formats.add((reader.getframerate(), reader.getnchannels(), reader.getsampwidth()))
-    assert formats == {(SAMPLE_RATE, 1, 2)}
+    assert formats == {(48000, 1, 2)}
+
+
+def test_engine_output_is_converted_to_the_requested_rate(tmp_path):
+    """出力形式を選べないエンジンでも、全ファイルを同じ形式にそろえる。"""
+    source = make_script(tmp_path, ["あいうえお"])
+    outdir = tmp_path / "audio"
+
+    result = export_narration(
+        source,
+        str(outdir),
+        AudioOptions(sample_rate=48000),
+        engine=FakeEngine(honors=False, sample_rate=16000),
+    )
+
+    assert result.audio_format.sample_rate == 48000
+    with wave.open(str(outdir / "narration_001.wav"), "rb") as reader:
+        assert reader.getframerate() == 48000
+    assert any("16000Hz" in w and "48000Hz" in w for w in result.warnings)
 
 
 def test_script_without_any_text_needs_no_engine(tmp_path):
@@ -187,6 +217,187 @@ def test_script_without_any_text_needs_no_engine(tmp_path):
     assert result.count == 2
     assert all(clip.silent for clip in result.clips)
     assert any("無音" in w for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# 読み上げ単位と間
+# ---------------------------------------------------------------------------
+
+
+def test_sentences_are_synthesized_one_by_one(tmp_path):
+    """1 枚分をまとめて渡すと文の切れ目が詰まるため、文ごとに合成する。"""
+    source = make_script(tmp_path, ["最初の文です。次の文です。", "別のスライドです。"])
+    engine = FakeEngine()
+
+    export_narration(source, str(tmp_path / "audio"), engine=engine)
+
+    jobs = engine.calls[0]["jobs"]
+    assert [job.text for job in jobs] == [
+        "最初の文です。",
+        "次の文です。",
+        "別のスライドです。",
+    ]
+    # どの合成単位がどのスライドのものかを保持する(失敗時に枚数で示すため)。
+    assert [job.slide for job in jobs] == [1, 1, 2]
+
+
+def test_pauses_are_inserted_between_sentences(tmp_path):
+    source = make_script(tmp_path, ["最初の文です。次の文です。"])
+    outdir = tmp_path / "audio"
+    style = ReadingStyle(sentence_pause=0.5, lead_silence=0.2, tail_silence=0.4)
+
+    quiet = export_narration(
+        source,
+        str(outdir),
+        AudioOptions(reading=ReadingStyle(sentence_pause=0, lead_silence=0, tail_silence=0)),
+        engine=FakeEngine(),
+    )
+    spaced = export_narration(
+        source, str(outdir), AudioOptions(reading=style), engine=FakeEngine(), force=True
+    )
+
+    # 文間 0.5 + 先頭 0.2 + 末尾 0.4 の分だけ長くなる。
+    assert spaced.clips[0].duration == pytest.approx(quiet.clips[0].duration + 1.1, abs=0.02)
+
+
+def test_tail_silence_is_added(tmp_path):
+    source = make_script(tmp_path, ["あいうえお"])
+    outdir = tmp_path / "audio"
+
+    without = export_narration(
+        source,
+        str(outdir),
+        AudioOptions(reading=ReadingStyle(tail_silence=0, lead_silence=0)),
+        engine=FakeEngine(),
+    )
+    base = without.clips[0].duration
+
+    with_tail = export_narration(
+        source,
+        str(outdir),
+        AudioOptions(reading=ReadingStyle(tail_silence=0.5, lead_silence=0)),
+        engine=FakeEngine(),
+        force=True,
+    )
+
+    assert with_tail.clips[0].duration == pytest.approx(base + 0.5, abs=0.02)
+    assert duration_of(outdir / "narration_001.wav") == pytest.approx(base + 0.5, abs=0.02)
+
+
+def test_reading_text_is_recorded(tmp_path):
+    """合成に渡した文字列を残し、原稿とどう違うかを後から確認できるようにする。"""
+    source = make_script(tmp_path, ["・箇条書きの項目\n詳しくは https://example.com/a を見てください"])
+    outdir = tmp_path / "audio"
+
+    result = export_narration(source, str(outdir), engine=FakeEngine())
+
+    clip = result.clips[0]
+    assert clip.text.startswith("・箇条書きの項目")  # 原稿は元のまま
+    assert "・" not in clip.reading
+    assert "https" not in clip.reading
+    assert clip.reading == "箇条書きの項目。 詳しくは を見てください。"
+    assert any("URL" in note for note in clip.notes)
+    assert manifest_of(outdir)["clips"][0]["reading"] == clip.reading
+
+
+def test_text_that_becomes_unreadable_is_silent(tmp_path):
+    """読み上げる文字が残らない場合も、番号がずれないよう無音を出す。"""
+    source = make_script(tmp_path, ["https://example.com/only-a-link"])
+
+    result = export_narration(source, str(tmp_path / "audio"), engine=FakeEngine())
+
+    assert result.count == 1
+    assert result.clips[0].silent
+    assert result.clips[0].text  # 原稿には文章が残っている
+
+
+def test_reading_dictionary_is_applied(tmp_path):
+    source = make_script(tmp_path, ["note の記事です。"])
+    style = ReadingStyle(dictionary={"note": "ノート"})
+
+    result = export_narration(
+        source, str(tmp_path / "audio"), AudioOptions(reading=style), engine=FakeEngine()
+    )
+
+    assert result.clips[0].reading == "ノート の記事です。"
+    assert any("ノート" in note for note in result.clips[0].notes)
+
+
+# ---------------------------------------------------------------------------
+# 音量
+# ---------------------------------------------------------------------------
+
+
+def test_loudness_is_matched_to_the_target(tmp_path):
+    source = make_script(tmp_path, ["読み上げる文章です。", "もう一枚あります。"])
+    outdir = tmp_path / "audio"
+
+    result = export_narration(
+        source, str(outdir), AudioOptions(loudness=-16.0), engine=FakeEngine()
+    )
+
+    assert result.loudness is not None
+    assert result.loudness.result_lufs == pytest.approx(-16.0, abs=0.5)
+    for clip in result.clips:
+        assert loudness_lufs(read_wav(clip.path)) == pytest.approx(-16.0, abs=1.0)
+
+
+def test_the_same_gain_is_applied_to_every_file(tmp_path):
+    """ファイルごとにそろえると、スライドが変わるたびに音量が動いて聞こえる。"""
+    source = make_script(tmp_path, ["大きい方の文章です。", "小さい方の文章です。"])
+    outdir = tmp_path / "audio"
+
+    class UnevenEngine(FakeEngine):
+        def synthesize(self, jobs, workdir, on_done=None, **kwargs):
+            for job in jobs:
+                # 2 枚目だけ半分の大きさで合成する。
+                write_tone(
+                    job.out_path,
+                    1.0,
+                    kwargs.get("sample_rate") or self.sample_rate,
+                    TONE_AMPLITUDE / (2 if job.slide == 2 else 1),
+                )
+                if on_done:
+                    on_done(job.index)
+            self.calls.append({"jobs": list(jobs), "workdir": workdir, **kwargs})
+            return SynthesisReport(voice="偽の音声", command=["fake"])
+
+    export_narration(source, str(outdir), engine=UnevenEngine())
+
+    louder = loudness_lufs(read_wav(str(outdir / "narration_001.wav")))
+    quieter = loudness_lufs(read_wav(str(outdir / "narration_002.wav")))
+    # 元の 6dB 差はそのまま残る(全体に同じ補正をかけただけ)。
+    assert louder - quieter == pytest.approx(6.0, abs=0.5)
+
+
+def test_loudness_can_be_turned_off(tmp_path):
+    source = make_script(tmp_path, ["読み上げる文章です。"])
+    outdir = tmp_path / "audio"
+
+    result = export_narration(
+        source, str(outdir), AudioOptions(loudness=None), engine=FakeEngine()
+    )
+
+    assert result.loudness is None
+    # 合成したままの大きさ(振幅 0.5 の音)で出る。
+    assert np.max(np.abs(read_wav(result.clips[0].path).samples)) == pytest.approx(0.5, abs=0.01)
+
+
+def test_peak_is_kept_below_the_ceiling(tmp_path):
+    """目標まで持ち上げてピークが上限を超える場合は、そこだけ抑える。"""
+    source = make_script(tmp_path, ["読み上げる文章です。"])
+    outdir = tmp_path / "audio"
+
+    result = export_narration(
+        source,
+        str(outdir),
+        AudioOptions(loudness=-3.0, peak_ceiling=-1.5),
+        engine=FakeEngine(),
+    )
+
+    assert result.loudness.limited
+    assert result.loudness.result_peak_dbfs == pytest.approx(-1.5, abs=0.1)
+    assert np.max(np.abs(read_wav(result.clips[0].path).samples)) < 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -202,17 +413,18 @@ def test_manifest_links_slides_and_audio(tmp_path):
         source, str(outdir), AudioOptions(speed=1.2, silent_duration=2), engine=FakeEngine()
     )
 
-    with open(result.manifest_path, encoding="utf-8") as f:
-        manifest = json.load(f)
+    manifest = manifest_of(outdir)
 
     assert manifest["count"] == 2
     assert manifest["engine"] == "fake"
     assert manifest["voice"] == "偽の音声"
     assert manifest["speed"] == 1.2
-    assert manifest["format"]["sample_rate"] == SAMPLE_RATE
+    assert manifest["format"]["sample_rate"] == 48000
+    assert manifest["loudness"]["result_lufs"] == pytest.approx(-16.0, abs=0.5)
     assert manifest["clips"][0]["file"] == "narration_001.wav"
     assert manifest["clips"][0]["text"] == "最初の文章。"
     assert manifest["clips"][0]["index"] == 1
+    assert manifest["clips"][0]["utterances"] == 1
     assert manifest["clips"][1]["silent"] is True
     assert manifest["total_duration"] == pytest.approx(result.total_duration, abs=0.01)
 
@@ -288,6 +500,17 @@ def test_failure_names_the_slides(tmp_path):
     assert "-JobFile" in message
 
 
+def test_failure_points_at_the_slide_not_the_sentence(tmp_path):
+    """1 枚が複数の文に分かれていても、失敗はスライド番号で示す。"""
+    source = make_script(tmp_path, ["最初の文。次の文。三つ目の文。"])
+
+    with pytest.raises(AudioExportError) as excinfo:
+        export_narration(source, str(tmp_path / "audio"), engine=FakeEngine(fail=[3]))
+
+    assert "1 枚分の音声を合成できませんでした" in str(excinfo.value)
+    assert "スライド 1" in str(excinfo.value)
+
+
 def test_workdir_is_kept_after_a_failure(tmp_path):
     source = make_script(tmp_path, ["あ"])
 
@@ -316,28 +539,16 @@ def test_workdir_can_be_kept(tmp_path):
     assert os.path.isdir(result.workdir)
 
 
-def test_sample_rate_that_cannot_be_used_is_reported(tmp_path):
-    source = make_script(tmp_path, ["あ"])
-
-    result = export_narration(
-        source,
-        str(tmp_path / "audio"),
-        AudioOptions(sample_rate=48000),
-        engine=FakeEngine(honors=False, sample_rate=16000),
-    )
-
-    assert any("--sample-rate" in w for w in result.warnings)
-    assert result.audio_format.sample_rate == 16000
-
-
 def test_invalid_options(tmp_path):
     source = make_script(tmp_path, ["あ"])
 
     for options in (
         AudioOptions(speed=0),
         AudioOptions(volume=200),
-        AudioOptions(tail_silence=-1),
+        AudioOptions(reading=ReadingStyle(tail_silence=-1)),
         AudioOptions(digits=0),
+        AudioOptions(loudness=-100),
+        AudioOptions(sample_rate=100),
     ):
         with pytest.raises(AudioExportError):
             export_narration(source, str(tmp_path / "audio"), options, engine=FakeEngine())
@@ -350,7 +561,9 @@ def test_options_are_passed_to_the_engine(tmp_path):
     export_narration(
         source,
         str(tmp_path / "audio"),
-        AudioOptions(voice="指定した音声", speed=0.9, volume=80, sample_rate=48000),
+        AudioOptions(
+            voice="指定した音声", speed=0.9, volume=80, sample_rate=44100, pitch=0.05, intonation=1.2
+        ),
         engine=engine,
         timeout=42,
     )
@@ -359,5 +572,41 @@ def test_options_are_passed_to_the_engine(tmp_path):
     assert call["voice"] == "指定した音声"
     assert call["speed"] == 0.9
     assert call["volume"] == 80
-    assert call["sample_rate"] == 48000
+    assert call["sample_rate"] == 44100
+    assert call["pitch"] == 0.05
+    assert call["intonation"] == 1.2
     assert call["timeout"] == 42
+
+
+def test_engine_passed_in_is_not_closed(tmp_path):
+    """呼び出し側が用意したエンジンは、こちらで止めない。"""
+    source = make_script(tmp_path, ["あ"])
+    engine = FakeEngine()
+
+    export_narration(source, str(tmp_path / "audio"), engine=engine)
+
+    assert not engine.closed
+
+
+def test_engine_we_created_is_closed(tmp_path, monkeypatch):
+    from note2slides import audio as audio_mod
+
+    engine = FakeEngine()
+    monkeypatch.setattr(audio_mod.tts_mod, "select_engine", lambda *a, **k: engine)
+
+    export_narration(make_script(tmp_path, ["あ"]), str(tmp_path / "audio"))
+
+    assert engine.closed
+
+
+def test_waveform_round_trip(tmp_path):
+    """書き出した WAV を読み直すと同じ波形になる(組み立てが壊れていないこと)。"""
+    path = tmp_path / "tone.wav"
+    write_tone(path, 0.5, 48000)
+
+    loaded = read_wav(str(path))
+
+    assert isinstance(loaded, Waveform)
+    assert loaded.sample_rate == 48000
+    assert loaded.duration == pytest.approx(0.5, abs=0.001)
+    assert np.max(np.abs(loaded.samples)) == pytest.approx(TONE_AMPLITUDE, abs=0.01)

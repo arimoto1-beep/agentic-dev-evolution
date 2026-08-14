@@ -12,7 +12,10 @@
 生成した資料は、動画制作で使うスライド画像とナレーション音声に変換できる。
 
     slide_images    : .pptx    -> slide_001.png ...(LibreOffice + pypdfium2)
-    narration + tts : .pptx    -> narration_001.wav ...(Windows の音声合成)
+    narration       : .pptx    -> ナレーション原稿
+    reading         : 原稿     -> 読み上げ単位 + 間の取り方
+    tts / voicevox  : 読み上げ単位 -> 合成した音声
+    waveform + audio: 音声     -> narration_001.wav ...(間と音量をそろえる)
 
 画像と音声は同じ番号(スライド番号)で対応する。
 """
@@ -22,6 +25,7 @@ from .markdown_reader import parse_article, parse_article_file
 from .model import Article, Deck, Slide
 from .narration import NarrationScript, NarrationSegment, extract_script
 from .planner import PlannerOptions, plan_deck
+from .reading import ReadingStyle, plan_reading
 from .renderer import render_deck
 from .slide_images import ExportResult, ImageOptions, SlideImage, export_slide_images
 from .style import Style
@@ -37,6 +41,7 @@ __all__ = [
     "NarrationScript",
     "NarrationSegment",
     "PlannerOptions",
+    "ReadingStyle",
     "Slide",
     "SlideImage",
     "Style",
@@ -47,6 +52,7 @@ __all__ = [
     "parse_article",
     "parse_article_file",
     "plan_deck",
+    "plan_reading",
     "render_deck",
 ]
 

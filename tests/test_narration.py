@@ -94,6 +94,19 @@ def test_section_slide_reads_its_title(tmp_path):
     assert segment.text == "第 1 章"
 
 
+def test_continuation_marker_is_not_read_aloud(tmp_path):
+    """「（続き）」は画面上の目印。読み上げると「かっこ つづき」になってしまう。"""
+    path = make_pptx(
+        tmp_path,
+        [Slide(kind=KIND_CODE, title="変換を自動化する（続き）", code="echo hello")],
+    )
+
+    segment = extract_script(path).segments[0]
+
+    assert segment.text == "変換を自動化する"
+    assert segment.title == "変換を自動化する（続き）"  # 一覧では元のタイトルを示す
+
+
 def test_code_is_not_read_aloud(tmp_path):
     # コードをそのまま読み上げても聞き取れないため、タイトルだけを読む。
     path = make_pptx(
