@@ -186,10 +186,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
-    voicevox_options = _voicevox_options(args)
+    voicevox_options = voicevox_options_from(args)
 
     if args.check or args.list_voices:
-        return _check(args, voicevox_options)
+        return check_tools(
+            args.engine,
+            args.powershell,
+            args.language,
+            args.voicevox_exe,
+            voicevox_options,
+            args.list_voices,
+        )
     if not args.input:
         print("入力する資料(.pptx)または原稿(.json)を指定してください。", file=sys.stderr)
         return EXIT_USAGE
@@ -244,7 +251,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     return EXIT_OK
 
 
-def _voicevox_options(args) -> dict:
+def voicevox_options_from(args) -> dict:
+    """VOICEVOX の接続先と起動の指定をまとめる(video_cli からも使う)。"""
     return {
         "url": args.voicevox_url,
         "exe": args.voicevox_exe,
@@ -328,15 +336,25 @@ def _hms(seconds: float) -> str:
     return f"{total // 60}分{total % 60:02d}秒"
 
 
-def _check(args, voicevox_options: dict) -> int:
-    """音声合成に使える環境かどうかを表示する。失敗したときの切り分けに使う。"""
-    targets = tts_mod.ENGINES if args.engine == tts_mod.ENGINE_AUTO else (args.engine,)
+def check_tools(
+    engine: str,
+    powershell: Optional[str],
+    language: str,
+    voicevox_exe: Optional[str],
+    voicevox_options: dict,
+    list_voices: bool = False,
+) -> int:
+    """音声合成に使える環境かどうかを表示する。失敗したときの切り分けに使う。
+
+    動画コマンド(video_cli)の `--check` からも同じ表示を使う。
+    """
+    targets = tts_mod.ENGINES if engine == tts_mod.ENGINE_AUTO else (engine,)
     usable = 0
     for name in targets:
         if name == voicevox_mod.ENGINE_NAME:
-            usable += _check_voicevox(args, voicevox_options)
+            usable += _check_voicevox(voicevox_exe, voicevox_options, list_voices)
         else:
-            usable += _check_windows(name, args.powershell, args.language)
+            usable += _check_windows(name, powershell, language)
     if not usable:
         print(
             "使える音声合成がありません。VOICEVOX を入れるか、Windows に日本語の音声を"
@@ -347,8 +365,10 @@ def _check(args, voicevox_options: dict) -> int:
     return EXIT_OK
 
 
-def _check_voicevox(args, voicevox_options: dict) -> int:
-    exe = voicevox_mod.find_engine_exe(args.voicevox_exe)
+def _check_voicevox(
+    voicevox_exe: Optional[str], voicevox_options: dict, list_voices: bool
+) -> int:
+    exe = voicevox_mod.find_engine_exe(voicevox_exe)
     url = voicevox_options["url"] or os.environ.get("VOICEVOX_URL") or voicevox_mod.DEFAULT_URL
     engine = voicevox_mod.VoicevoxEngine(**voicevox_options)
     try:
@@ -367,7 +387,7 @@ def _check_voicevox(args, voicevox_options: dict) -> int:
         print(f"  実行ファイル: {exe}")
     default = engine.pick_style()
     print(f"  既定の音声: {default.name}(公開時の表示: {default.credit})")
-    if args.list_voices:
+    if list_voices:
         for style in talk:
             mark = "*" if style.name == default.name else " "
             print(f"  {mark} {style.name}(id={style.id})")

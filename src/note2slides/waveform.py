@@ -103,21 +103,88 @@ def _decode(raw: bytes, sample_width: int, path: str) -> np.ndarray:
     raise WaveformError(f"対応していない量子化ビット数です({sample_width * 8}bit): {path}")
 
 
+def _encode(samples: np.ndarray) -> bytes:
+    """-1.0〜1.0 の float を 16bit PCM のバイト列にする。"""
+    clipped = np.clip(samples, -1.0, 1.0)
+    # -32768 側に飛ばさないよう 32767 で量子化する(振り切れによる歪みを避ける)。
+    return np.round(clipped * 32767.0).astype("<i2").tobytes()
+
+
 def write_wav(path: str, waveform: Waveform) -> None:
     """16bit PCM のモノラル WAV として書き出す。"""
-    clipped = np.clip(waveform.samples, -1.0, 1.0)
-    # -32768 側に飛ばさないよう 32767 で量子化する(振り切れによる歪みを避ける)。
-    data = np.round(clipped * 32767.0).astype("<i2")
+    with WavWriter(path, waveform.sample_rate) as writer:
+        writer.append(waveform)
+
+
+class WavWriter:
+    """WAV を少しずつ書き足す。
+
+    動画用に全スライドのナレーションを 1 本につなぐとき、つないだ結果を一度に
+    記憶へ載せると長い動画で数百 MB になる。1 枚分ずつ書き足せば、同時に持つのは
+    1 枚分だけで済む。
+    """
+
+    def __init__(self, path: str, sample_rate: int) -> None:
+        self.path = path
+        self.sample_rate = sample_rate
+        self.frames = 0
+        try:
+            self._writer = wave.open(path, "wb")
+            self._writer.setnchannels(1)
+            self._writer.setsampwidth(SAMPLE_WIDTH)
+            self._writer.setframerate(sample_rate)
+        except (wave.Error, OSError) as exc:
+            raise WaveformError(
+                f"音声ファイルを書き出せませんでした: {path}\n{type(exc).__name__}: {exc}"
+            ) from exc
+
+    def append(self, waveform: Waveform) -> None:
+        if waveform.sample_rate != self.sample_rate and not waveform.is_empty:
+            raise WaveformError(
+                f"標本化周波数が揃っていないため書き足せません: "
+                f"{self.sample_rate}Hz と {waveform.sample_rate}Hz"
+            )
+        if waveform.is_empty:
+            return
+        try:
+            self._writer.writeframes(_encode(waveform.samples))
+        except (wave.Error, OSError) as exc:
+            raise WaveformError(
+                f"音声ファイルを書き出せませんでした: {self.path}\n{type(exc).__name__}: {exc}"
+            ) from exc
+        self.frames += len(waveform.samples)
+
+    @property
+    def duration(self) -> float:
+        return self.frames / self.sample_rate if self.sample_rate else 0.0
+
+    def close(self) -> None:
+        self._writer.close()
+
+    def __enter__(self) -> "WavWriter":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+
+def probe_duration(path: str) -> float:
+    """WAV の長さ(秒)を、中身を読まずにヘッダだけから求める。
+
+    動画の尺を決めるときは長さだけ分かればよい。全ファイルを読み込むと、
+    枚数の多い資料で無駄に時間と記憶を使う。
+    """
     try:
-        with wave.open(path, "wb") as writer:
-            writer.setnchannels(1)
-            writer.setsampwidth(SAMPLE_WIDTH)
-            writer.setframerate(waveform.sample_rate)
-            writer.writeframes(data.tobytes())
-    except (wave.Error, OSError) as exc:
+        with wave.open(path, "rb") as reader:
+            frames = reader.getnframes()
+            rate = reader.getframerate()
+    except (wave.Error, EOFError, OSError) as exc:
         raise WaveformError(
-            f"音声ファイルを書き出せませんでした: {path}\n{type(exc).__name__}: {exc}"
+            f"音声ファイルを読み取れませんでした: {path}\n{type(exc).__name__}: {exc}"
         ) from exc
+    if not rate:
+        raise WaveformError(f"音声ファイルの形式が不正です(標本化周波数が 0): {path}")
+    return frames / rate
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +208,22 @@ def concat(parts: Sequence[Waveform], sample_rate: int) -> Waveform:
     if not usable:
         return Waveform(np.zeros(0), sample_rate)
     return Waveform(np.concatenate([p.samples for p in usable]), sample_rate)
+
+
+def fit(waveform: Waveform, frames: int) -> Waveform:
+    """指定した標本数ちょうどにそろえる(足りなければ無音を足す)。
+
+    動画では 1 枚のスライドを映す長さと、その間に流す音声の長さが一致していないと、
+    ずれが後ろのスライドへ積み重なる。長さの調整はここに集約する。
+    """
+    frames = max(0, frames)
+    if len(waveform.samples) == frames:
+        return waveform
+    if len(waveform.samples) > frames:
+        return Waveform(waveform.samples[:frames], waveform.sample_rate)
+    padded = np.zeros(frames)
+    padded[: len(waveform.samples)] = waveform.samples
+    return Waveform(padded, waveform.sample_rate)
 
 
 def trim_silence(waveform: Waveform, threshold_db: float = -50.0, margin: float = 0.02) -> Waveform:

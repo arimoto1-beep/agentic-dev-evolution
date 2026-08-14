@@ -80,7 +80,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.check:
-        return _check(args.soffice)
+        return check_tools(args.soffice)
     if not args.input:
         print("入力する資料を指定してください。", file=sys.stderr)
         return EXIT_USAGE
@@ -137,8 +137,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     return EXIT_OK
 
 
-def _check(explicit: Optional[str]) -> int:
-    """外部ツールの状態を表示する。変換が失敗したときの切り分けに使う。"""
+def check_tools(explicit: Optional[str] = None) -> int:
+    """外部ツールの状態を表示する。変換が失敗したときの切り分けに使う。
+
+    動画コマンド(video_cli)の `--check` からも同じ表示を使う。
+    """
     ok = True
 
     soffice = find_soffice(explicit)

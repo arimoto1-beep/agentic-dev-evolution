@@ -140,6 +140,54 @@ def test_round_trip_keeps_the_waveform(tmp_path):
     assert np.max(np.abs(loaded.samples - original.samples)) < 1e-4
 
 
+def test_writing_in_pieces_gives_the_same_file(tmp_path):
+    """長いナレーションは 1 枚分ずつ書き足す(全体を記憶に載せないため)。"""
+    whole = str(tmp_path / "whole.wav")
+    pieces = str(tmp_path / "pieces.wav")
+    first, second = sine(-6.0, seconds=0.2), sine(-12.0, seconds=0.3)
+
+    wf.write_wav(whole, wf.concat([first, second], 48000))
+    with wf.WavWriter(pieces, 48000) as writer:
+        writer.append(first)
+        writer.append(second)
+        assert writer.duration == pytest.approx(0.5)
+
+    assert open(whole, "rb").read() == open(pieces, "rb").read()
+
+
+def test_writing_a_different_rate_is_refused(tmp_path):
+    with pytest.raises(WaveformError, match="標本化周波数"):
+        with wf.WavWriter(str(tmp_path / "out.wav"), 48000) as writer:
+            writer.append(sine(-6.0, seconds=0.1, sample_rate=16000))
+
+
+def test_duration_is_read_without_loading_the_audio(tmp_path):
+    path = str(tmp_path / "tone.wav")
+    wf.write_wav(path, sine(-6.0, seconds=1.25))
+
+    assert wf.probe_duration(path) == pytest.approx(1.25)
+
+
+def test_probe_duration_reports_a_broken_file(tmp_path):
+    path = tmp_path / "broken.wav"
+    path.write_bytes(b"not a wav")
+
+    with pytest.raises(WaveformError, match="読み取れませんでした"):
+        wf.probe_duration(str(path))
+
+
+def test_fit_pads_with_silence_or_cuts(tmp_path):
+    tone = sine(-6.0, seconds=0.5)
+
+    padded = wf.fit(tone, 48000)
+    cut = wf.fit(tone, 12000)
+
+    assert len(padded.samples) == 48000
+    assert padded.samples[-1] == 0.0  # 足したのは無音
+    assert np.array_equal(padded.samples[: len(tone.samples)], tone.samples)
+    assert len(cut.samples) == 12000
+
+
 def test_stereo_input_becomes_mono(tmp_path):
     path = str(tmp_path / "stereo.wav")
     left = np.full(1000, 0.5)

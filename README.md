@@ -24,16 +24,17 @@ note記事を入力として、eラーニング形式のYouTube通常動画を�
 
 ## note2slides
 
-Markdown 記事から、16:9 のプレゼンテーション資料(.pptx)と、動画制作で使うスライド画像・ナレーション音声を生成します。
-動画化パイプラインのうち、「資料生成」「スライド画像化」「音声生成」にあたります。
+Markdown 記事から、16:9 のプレゼンテーション資料(.pptx)と、ナレーション付きの動画(.mp4)を生成します。
 
 ```
-                            +--[note2slides-images]--> slide_001.png ...
-記事(.md) --[note2slides]--> 資料(.pptx)
-                            +--[note2slides-audio]---> narration_001.wav ...
+記事(.md) --[note2slides]--> 資料(.pptx) --[note2slides-video]--> 動画(.mp4)
+                                              |
+                                              +--[note2slides-images]--> slide_001.png ...
+                                              +--[note2slides-audio]---> narration_001.wav ...
 ```
 
 画像と音声は同じ番号(スライド番号)で対応します。`slide_001.png` に対応する音声が `narration_001.wav` です。
+動画生成はこの 2 つを呼び出すので、資料から動画までは 1 コマンドで作れます。
 
 資料は Office Open XML なので、PowerPoint でも LibreOffice Impress でも開いて編集できます。
 
@@ -45,18 +46,23 @@ python -m venv .venv
 # .venv/bin/python -m pip install -e ".[dev]"         # macOS / Linux
 ```
 
-外部ツールは、使う機能に応じて必要になります。どちらも無くても資料(.pptx)は生成できます。
+外部ツールは、使う機能に応じて必要になります。どれも無くても資料(.pptx)は生成できます。
+PowerPoint は不要です。
 
 | ツール | 必要な機能 | 無い場合 |
 | --- | --- | --- |
-| [LibreOffice](https://ja.libreoffice.org/) | スライド画像 | PDF を直接入力すれば不要 |
-| [VOICEVOX](https://voicevox.hiroshiba.jp/) | ナレーション音声 | Windows 標準の音声合成に切り替わる(声の質は落ちます) |
+| [LibreOffice](https://ja.libreoffice.org/) | スライド画像 / 動画 | PDF を直接入力すれば不要 |
+| [VOICEVOX](https://voicevox.hiroshiba.jp/) | ナレーション音声 / 動画 | Windows 標準の音声合成に切り替わる(声の質は落ちます) |
+| ffmpeg | 動画 | 上の `pip install` で同梱のものが入るため、別途の導入は不要 |
 
 ### 使い方
 
 ```bash
 # 記事 -> 資料
 .venv/Scripts/python.exe -m note2slides.cli samples/sample_article.md -o build/sample.pptx
+
+# 資料 -> ナレーション付き動画(スライド画像と音声も同時に作ります)
+.venv/Scripts/python.exe -m note2slides.video_cli build/sample.pptx -o build/sample.mp4
 
 # 資料 -> スライド画像
 .venv/Scripts/python.exe -m note2slides.images_cli build/sample.pptx -o build/slides
@@ -348,6 +354,118 @@ VOICEVOX は、起動していればそこに接続し、起動していなけ�
 
 終了コードは、成功 0 / 引数の誤り 2 / 出力先に既存 3 / 合成失敗 4 / 音声合成が使えない 5 です。
 
+## ナレーション付き動画(note2slides-video)
+
+資料から、スライドごとにナレーションが付いた動画(MP4)を作ります。
+スライド画像とナレーション音声も内部で書き出すので、資料があれば 1 コマンドで動画まで作れます。
+
+```bash
+.venv/Scripts/python.exe -m note2slides.video_cli build/sample.pptx -o build/sample.mp4
+```
+
+```
+build/
+  sample.mp4          動画本体
+  sample_video.json   何秒目にどのスライドが出るかの一覧
+  sample_slides/      途中で作ったスライド画像
+  sample_audio/       途中で作ったナレーション音声
+```
+
+動画は **1920x1080 (16:9) / 30fps / H.264(yuv420p)+ AAC 48kHz ステレオ の MP4** です。
+YouTube にそのまま投稿でき、一般的なプレイヤーでも再生できます。PowerPoint は使いません。
+
+### スライドの切り替わりと音声のずれについて
+
+「そのスライドのナレーションが終わるまで、そのスライドを映す」ようにしています。
+音声と映像の長さが少しでも食い違うと、ずれが後ろのスライドへ積み重なり、最後には
+別のスライドを読み上げているように見えてしまうため、長さは次の順で決めています。
+
+1. 1 枚を映す長さを、その音声の長さ以上にする(切り上げるだけで、縮めません)
+2. その長さをコマ単位に切り上げる(動画は 1/fps より細かい時刻を表せません)
+3. 音声側にも無音を足して、2 で決めた長さちょうどにそろえる
+
+そのため、ナレーションの途中でスライドが変わることも、音声が途中で切れることもありません。
+実際に割り当てた時刻は `sample_video.json` に入っています。
+
+```json
+{ "index": 2, "image": "slide_002.png", "audio": "narration_002.wav",
+  "start": 5.033, "at": "0:00:05.0", "duration": 20.7, "narration": 20.674 }
+```
+
+`at` の時刻をプレイヤーで開けば、そのスライドの先頭から確認できます。
+`duration` と `narration` の差(この例では 0.026 秒)が、長さをそろえるために足した無音です。
+
+### 内容を確認して直すとき
+
+動画をひととおり見て、読み方や見た目を直したくなった場合、**動画全体を作り直す必要はありません**。
+`sample_slides/` と `sample_audio/` に素材が残っているので、直したい工程だけをやり直して、
+素材から動画を組み立て直せます。
+
+```bash
+# 例: 読み方だけを直す(音声を作り直す)
+.venv/Scripts/python.exe -m note2slides.audio_cli build/sample.pptx -o build/sample_audio -f --dict readings.json
+
+# 素材から動画を組み立て直す(資料は指定しない)
+.venv/Scripts/python.exe -m note2slides.video_cli --slides build/sample_slides --audio build/sample_audio \
+    -o build/sample.mp4 -f
+```
+
+素材はスライド番号で対応付けます。枚数や番号が食い違う場合は、どの番号が足りないかを示して中断します
+(気付かないまま、別のスライドを読み上げる動画ができるのを避けるため)。
+
+### 主なオプション
+
+| オプション | 説明 |
+| --- | --- |
+| `-o, --output` | 出力する動画(既定は入力と同じ場所・同じ名前の .mp4) |
+| `-f, --force` | 出力先が既にある場合に上書きする |
+| `--slides` / `--audio` | 素材の場所(資料を指定しない場合は、ここにある素材から組み立てる) |
+| `--width` / `--height` | 画面の大きさ(既定は 1920、高さは 16:9 で自動計算) |
+| `--fps` | フレームレート(既定 30) |
+| `--crf` / `--preset` | 画質と符号化の速さ(既定 20 / medium。数字が小さいほど高画質) |
+| `--min-duration` | 1 枚を映す最短の長さ(秒、既定 1.0) |
+| `--background` | 16:9 に足す余白の色(既定 `#ffffff`) |
+| `--engine` / `--voice` / `--speed` / `--dict` | 音声合成の指定(note2slides-audio と同じ) |
+| `--silence` | 読み上げる文章が無いスライドの長さ(秒、既定 2.0) |
+| `--no-loudness` | 音量の調整をしない |
+| `--audio-bitrate` | 動画の音声の符号化量(既定 192k) |
+| `--ffmpeg` / `--soffice` / `--powershell` | 外部ツールの場所(環境変数 `FFMPEG_PATH` などでも指定可) |
+| `--timeout` / `--slides-timeout` / `--audio-timeout` | 各工程の待ち時間(秒、既定 1800 / 300 / 1800) |
+| `--keep-work` | 書き出しに使った作業ファイル(ffmpeg への指示と音声トラック)を残す |
+| `--check` | 生成に必要な外部ツールの状態だけを表示する |
+
+細かい調整(間の長さ、読み方辞書以外の読み上げ指定、画像の形式など)は、
+それぞれの工程のコマンドで行い、`--slides` / `--audio` で組み立て直してください。
+
+### 生成に失敗したとき
+
+まず環境の状態を確認します(ffmpeg・LibreOffice・音声合成をまとめて表示します)。
+
+```bash
+.venv/Scripts/python.exe -m note2slides.video_cli --check
+```
+
+失敗時のメッセージには、実行した ffmpeg のコマンド・終了コード・出力がそのまま載ります。
+ffmpeg への指示(どのスライドを何コマ映すか)とつないだ音声は作業ディレクトリに残すので、
+同じコマンドを手元で実行すれば同じ失敗を再現できます。書きかけの動画は削除します
+(完成したものと見分けが付かないため)。
+
+| 症状 | 確認すること |
+| --- | --- |
+| ffmpeg が見つからない | `pip install -e .` を実行したか。`--ffmpeg` か `FFMPEG_PATH` で場所を指定する |
+| libx264 / aac が使えないと言われる | ffmpeg のビルド。同梱のもの(`--ffmpeg` を指定しない)を使う |
+| 画像と音声の対応が取れない | 同じ資料から書き出した素材か。片方だけ作り直していないか |
+| スライド画像の大きさが揃っていない | 同じ条件で書き出した画像か(note2slides-images は揃えて出します) |
+| 時間切れになる | 資料の長さ。`--timeout` を延ばす(1 時間の動画で数十分かかることがあります) |
+| 動画の長さが合わないと警告が出る | `sample_video.json` の `duration` と実際の長さ。ナレーションが切れていないか |
+
+終了コードは、成功 0 / 引数の誤り 2 / 出力先に既存 3 / 生成失敗 4 / 外部ツールが使えない 5 です。
+
+### 今回扱わないこと
+
+BGM・字幕・サムネイル・チャプター・映像演出は入れていません。YouTube への投稿も行いません
+(できあがった動画を人が確認してから投稿する想定です)。
+
 ## 開発
 
 ```bash
@@ -374,11 +492,18 @@ voicevox        : 読み上げ単位 -> WAV(VOICEVOX ENGINE を HTTP で呼ぶ)
 tts             : 読み上げ単位 -> WAV(speech.ps1 経由で Windows の音声合成を呼ぶ)
 waveform        : WAV の読み書き・間を置いた連結・音量の測定(BS.1770)
 audio           : 上記を束ねて narration_001.wav ... + narration.json
+
+ffmpeg          : ffmpeg の場所の解決・実行・進捗の読み取り
+video           : 画像 + 音声 -> 時間の割り当て -> sample.mp4 + sample_video.json
 ```
 
 レイアウトの調整は `src/note2slides/style.py`、画像の出力条件は `ImageOptions`、
-音声の出力条件は `AudioOptions`(間の取り方は `ReadingStyle`)に集約しています。
+音声の出力条件は `AudioOptions`(間の取り方は `ReadingStyle`)、動画の出力条件は `VideoOptions`
+に集約しています。
 外部コマンドの呼び出しで共通する部分(実行したコマンドと出力を失敗時に残す)は `proc.py` にあります。
+
+動画の同期は `video.py` の `build_timeline` だけで決まります。ここが「スライドを何秒映すか」と
+「音声を何秒に合わせるか」の両方を返すので、映像と音声の長さが食い違うことがありません。
 
 音声の質に効く判断は次の 3 か所に分かれています。どれを変えても他に影響しません。
 

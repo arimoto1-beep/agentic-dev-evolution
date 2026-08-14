@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "note2slides"
 version = "0.1.0"
-description = "note 記事(Markdown)から eラーニング用のプレゼンテーション(.pptx)・スライド画像・ナレーション音声を生成する"
+description = "note 記事(Markdown)から eラーニング用のプレゼンテーション(.pptx)・スライド画像・ナレーション音声・ナレーション付き動画を生成する"
 requires-python = ">=3.10"
 dependencies = [
     "python-pptx>=1.0",
@@ -13,6 +13,7 @@ dependencies = [
     "pypdfium2>=4.0",  # PDF をスライド画像に描画する
     "pillow>=10.0",    # 描画結果を PNG / JPEG として書き出す
     "numpy>=1.26",     # 音声の組み立てと音量測定(ITU-R BS.1770)
+    "imageio-ffmpeg>=0.5",  # 動画の書き出しに使う ffmpeg(別途の導入を不要にする)
 ]
 
 [project.optional-dependencies]
@@ -24,6 +25,7 @@ dev = [
 note2slides = "note2slides.cli:main"
 note2slides-images = "note2slides.images_cli:main"
 note2slides-audio = "note2slides.audio_cli:main"
+note2slides-video = "note2slides.video_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
