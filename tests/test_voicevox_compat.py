@@ -170,6 +170,41 @@ def test_a_slide_is_read_as_one_continuous_utterance(tmp_path, engine):
     assert abs(in_context - before) < abs(on_its_own - before)
 
 
+def test_the_first_and_last_sounds_are_not_cut_off(tmp_path, nemo):
+    """読み上げが、エンジンの決めた読みの長さぶん出ていることを確かめる。
+
+    VOICEVOX は前後の余白も含めて 1 本の波形を作るため、余白なしで頼むと
+    最初の拍が無音から立ち上がる形で作られ、本来の大きさになるまで 70ms ほど
+    かかる(最後の拍も、消え際が途中で終わる)。拍の長さは 0.1 秒前後なので、
+    痩せたぶんは前後の無音として切り落とされ、音声はエンジンが決めた読みより
+    短くなる。動画の最初の一言はここで聞こえなくなる。
+    """
+    text = "eラーニング動画のつくり方。"  # 母音だけの拍で始まる(子音より痩せが目立つ)
+    script = tmp_path / "script.json"
+    script.write_text(
+        json.dumps({"segments": [{"index": 1, "text": text}]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    result = export_narration(
+        str(script),
+        str(tmp_path / "audio"),
+        # 前後の無音を入れない。ここで見たいのは読み上げそのものの長さ。
+        AudioOptions(reading=ReadingStyle(lead_silence=0, opening_silence=0, tail_silence=0)),
+        engine=nemo,
+    )
+
+    # エンジン自身が決めた読みの長さ(拍の長さの合計)と比べる。
+    phrases = nemo.read(text, nemo.pick_style())
+    planned = sum(
+        (mora.get("consonant_length") or 0.0) + (mora.get("vowel_length") or 0.0)
+        for phrase in phrases
+        for mora in phrase["moras"]
+    )
+
+    assert read_wav(result.clips[0].path).duration >= planned
+
+
 def test_sentences_get_a_pause_between_them(tmp_path, engine):
     """間は読み上げの中に置くので、間の長さの分だけ長くなる。"""
     script = tmp_path / "script.json"

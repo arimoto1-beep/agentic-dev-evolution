@@ -9,6 +9,7 @@ import json
 import math
 import os
 import wave
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -54,6 +55,13 @@ def write_samples(path, data, sample_rate=SAMPLE_RATE):
 def duration_of(path):
     with wave.open(str(path), "rb") as reader:
         return reader.getnframes() / reader.getframerate()
+
+
+def leading_silence(path):
+    """音が鳴り始めるまでの長さ(秒)。"""
+    audio = read_wav(str(path))
+    loud = np.flatnonzero(np.abs(audio.samples) > 10 ** (-50 / 20))
+    return len(audio.samples) / audio.sample_rate if len(loud) == 0 else loud[0] / audio.sample_rate
 
 
 class FakeEngine:
@@ -274,12 +282,20 @@ def test_silent_slides_are_not_sent_to_the_engine(tmp_path):
 def test_pauses_are_inserted_between_sentences(tmp_path):
     source = make_script(tmp_path, ["最初の文です。次の文です。"])
     outdir = tmp_path / "audio"
-    style = ReadingStyle(sentence_pause=0.5, lead_silence=0.2, tail_silence=0.4)
+    # 1 枚しかないので、先頭の無音は opening_silence 側で決まる。ここで見たいのは
+    # lead / tail / 文間なので、どちらの条件でも 0 にしてそろえる。
+    style = ReadingStyle(
+        sentence_pause=0.5, lead_silence=0.2, opening_silence=0, tail_silence=0.4
+    )
 
     quiet = export_narration(
         source,
         str(outdir),
-        AudioOptions(reading=ReadingStyle(sentence_pause=0, lead_silence=0, tail_silence=0)),
+        AudioOptions(
+            reading=ReadingStyle(
+                sentence_pause=0, lead_silence=0, opening_silence=0, tail_silence=0
+            )
+        ),
         engine=FakeEngine(),
     )
     spaced = export_narration(
@@ -288,6 +304,51 @@ def test_pauses_are_inserted_between_sentences(tmp_path):
 
     # 文間 0.5 + 先頭 0.2 + 末尾 0.4 の分だけ長くなる。
     assert spaced.clips[0].duration == pytest.approx(quiet.clips[0].duration + 1.1, abs=0.02)
+
+
+def test_only_the_first_slide_gets_the_opening_silence(tmp_path):
+    """動画の書き出しは 1 枚目から始まるので、そこだけ話し始めを遅らせる。"""
+    source = make_script(tmp_path, ["あいうえお", "あいうえお"])
+
+    result = export_narration(
+        source,
+        str(tmp_path / "audio"),
+        AudioOptions(reading=ReadingStyle(lead_silence=0.2, opening_silence=1.0, tail_silence=0)),
+        engine=FakeEngine(),
+    )
+
+    first, second = result.clips
+    # 読み上げる文章は同じなので、差は先頭の無音の分(1.0 - 0.2)だけになる。
+    assert first.duration == pytest.approx(second.duration + 0.8, abs=0.02)
+    assert leading_silence(tmp_path / "audio" / "narration_001.wav") == pytest.approx(1.0, abs=0.02)
+    assert leading_silence(tmp_path / "audio" / "narration_002.wav") == pytest.approx(0.2, abs=0.02)
+
+
+def test_opening_silence_does_not_change_the_reading(tmp_path):
+    """足すのは無音だけで、読み上げの中身と間はそのまま。"""
+    source = make_script(tmp_path, ["最初の文です。次の文です。"])
+    outdir = tmp_path / "audio"
+    style = ReadingStyle(sentence_pause=0.35, lead_silence=0.3, tail_silence=0.7)
+
+    engine = FakeEngine()
+    quick = export_narration(
+        source, str(outdir), AudioOptions(reading=replace(style, opening_silence=0.3)), engine=engine
+    )
+    patient = export_narration(
+        source,
+        str(outdir),
+        AudioOptions(reading=replace(style, opening_silence=1.0)),
+        engine=engine,
+        force=True,
+    )
+
+    assert quick.clips[0].reading == patient.clips[0].reading
+    # 合成に渡す内容(区切りと間)は変わらない。
+    first, second = (call["jobs"][0] for call in engine.calls)
+    assert [(p.text, p.pause_after) for p in first.pieces] == [
+        (p.text, p.pause_after) for p in second.pieces
+    ]
+    assert patient.clips[0].duration == pytest.approx(quick.clips[0].duration + 0.7, abs=0.02)
 
 
 def test_tail_silence_is_added(tmp_path):
@@ -357,7 +418,11 @@ def test_hold_makes_the_slide_longer(tmp_path):
         encoding="utf-8",
     )
 
-    result = export_narration(str(path), str(tmp_path / "audio"), engine=FakeEngine())
+    # 1 枚目だけ話し始めが遅いので、2 枚との差が hold の分だけになるようそろえる。
+    style = ReadingStyle(opening_silence=ReadingStyle().lead_silence)
+    result = export_narration(
+        str(path), str(tmp_path / "audio"), AudioOptions(reading=style), engine=FakeEngine()
+    )
 
     assert result.clips[1].duration == pytest.approx(result.clips[0].duration + 3.0, abs=0.01)
 

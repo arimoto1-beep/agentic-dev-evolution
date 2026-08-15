@@ -449,7 +449,7 @@ def compose_video(
             result.workdir = workdir
             keep_work = True
             raise
-        result.encoded_duration = encoded.out_time
+        result.encoded_duration = _encoded_duration(encoded, options)
     finally:
         if keep_work:
             result.workdir = workdir
@@ -472,6 +472,19 @@ def compose_video(
 
     result.manifest_path = _write_manifest(result, options, source_name)
     return result
+
+
+def _encoded_duration(report: ffmpeg_mod.RunReport, options: VideoOptions) -> float:
+    """ffmpeg が実際に書き出した長さ(秒)。
+
+    進捗の `out_time` ではなくコマ数から求める。`out_time` は最後に書き出した
+    パケットの復号時刻なので、符号化が先読みする分(既定の preset では 2 コマ)
+    だけ手前で止まって見え、長さの食い違いとして誤検出される。コマ数は
+    書き出した枚数そのものなので、この差が出ない。
+    """
+    if report.frames:
+        return report.frames / options.fps
+    return report.out_time
 
 
 def build_command(

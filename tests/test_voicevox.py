@@ -446,9 +446,28 @@ def test_speech_settings_are_sent(engine, tmp_path, http):
     assert payload["volumeScale"] == pytest.approx(0.8)
     assert payload["outputSamplingRate"] == 48000
     assert payload["outputStereo"] is False
-    # 前後の余白は音声を組み立てる側で入れ直すので、エンジンには付けさせない。
-    assert payload["prePhonemeLength"] == 0.0
-    assert payload["postPhonemeLength"] == 0.0
+
+
+def test_padding_is_requested_around_the_reading(engine, tmp_path, http):
+    """余白なしで頼むと、最初と最後の拍が無音から立ち上がる形で作られて痩せる。
+
+    余白は音声を組み立てる側(audio.py)が削って入れ直すので、聞こえる長さも
+    間も変わらない。
+    """
+    engine.synthesize(jobs_in(tmp_path, ["こんにちは。"]), str(tmp_path / "work"))
+
+    payload = http.payloads[0]
+    assert payload["prePhonemeLength"] == pytest.approx(voicevox.SYNTH_PADDING)
+    assert payload["postPhonemeLength"] == pytest.approx(voicevox.SYNTH_PADDING)
+
+
+def test_padding_keeps_its_length_at_other_speeds(engine, tmp_path, http):
+    """間と同じく、余白も speedScale で割られる(割られたあとが余白の長さになる)。"""
+    engine.synthesize(jobs_in(tmp_path, ["こんにちは。"]), str(tmp_path / "work"), speed=0.5)
+
+    payload = http.payloads[0]
+    assert payload["prePhonemeLength"] == pytest.approx(voicevox.SYNTH_PADDING * 0.5)
+    assert payload["postPhonemeLength"] == pytest.approx(voicevox.SYNTH_PADDING * 0.5)
 
 
 def test_the_chosen_style_is_used(engine, tmp_path, http):

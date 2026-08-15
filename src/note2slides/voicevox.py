@@ -79,6 +79,17 @@ DEFAULT_URL = "http://127.0.0.1:50021"
 DEFAULT_SAMPLE_RATE = 48000
 #: 起動を待つ時間(秒)。初回は音声モデルの読み込みで時間がかかる。
 DEFAULT_STARTUP_TIMEOUT = 180.0
+#: 合成を頼むときに、読み上げの前後へ付けさせる余白(秒)。
+#:
+#: VOICEVOX は前後の余白も含めて 1 本の波形を作る。0 にすると最初の拍が
+#: 「無音から立ち上がる」条件で作られ、本来の大きさになるまで 70ms ほどかかる。
+#: 拍の長さは 0.1 秒前後なので、スライドの 1 音目がほとんど聞こえない
+#: (最後の拍も同じように、消え際が途中で終わる)。
+#:
+#: 余白を付けて作らせ、`audio.py` が削ってから間を入れ直す。余白は捨てるので
+#: 読み上げの長さも間も変わらず、変わるのは前後の拍の作られ方だけ。0.3 秒は、
+#: これ以上増やしても波形が変わらなくなる長さ(0.5 秒との差が測定できない)。
+SYNTH_PADDING = 0.3
 
 _ALTERNATIVE_HINT = (
     "Windows 標準の音声合成を使う場合は --engine sapi または --engine onecore を指定できます。"
@@ -586,9 +597,12 @@ class VoicevoxEngine:
             "pitchScale": float(pitch),
             "intonationScale": float(intonation),
             "volumeScale": max(0.0, min(1.0, volume / 100.0)),
-            # 前後の余白は音声を組み立てるときに入れ直すため、ここでは付けない。
-            "prePhonemeLength": 0.0,
-            "postPhonemeLength": 0.0,
+            # 前後の余白は音声を組み立てるときに削って入れ直すが、ここで 0 に
+            # すると最初と最後の拍が痩せる(`SYNTH_PADDING`)。VOICEVOX は
+            # 余白も speedScale で割るため、指定した速さでも余白が同じ長さに
+            # なるよう掛けておく。
+            "prePhonemeLength": SYNTH_PADDING * max(speed, 0.0),
+            "postPhonemeLength": SYNTH_PADDING * max(speed, 0.0),
             "outputSamplingRate": int(sample_rate or DEFAULT_SAMPLE_RATE),
             "outputStereo": False,
         }

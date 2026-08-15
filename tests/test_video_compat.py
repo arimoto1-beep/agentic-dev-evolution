@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 
+import numpy as np
 import pytest
 
 from note2slides import convert_file, tts
@@ -18,6 +19,7 @@ from note2slides.audio import AudioOptions
 from note2slides.reading import ReadingStyle
 from note2slides.soffice import find_soffice
 from note2slides.video import VideoOptions, export_video
+from note2slides.waveform import read_wav
 
 pytestmark = pytest.mark.slow
 
@@ -104,3 +106,28 @@ def test_article_becomes_a_narrated_video(tmp_path, engine_name):
     assert "Video: h264" in probe
     assert "Audio: aac" in probe
     assert "640x360" in probe
+
+    # 再生を始めた直後は、まだ画面も見ておらず音も出始めたところなので、
+    # 1 音目をそこへ置かない(置くと最初の一言を聞き逃す)。
+    opening = ReadingStyle().opening_silence
+    assert speech_starts_at(ffmpeg, out_path, str(tmp_path / "head.wav")) == pytest.approx(
+        opening, abs=0.25
+    )
+
+
+def speech_starts_at(ffmpeg, video_path, out_path, seconds=4.0):
+    """動画の音声を実際に復号して、声が出始める時刻(秒)を返す。
+
+    音声ファイルの中身ではなく、書き出した動画そのものを見る。途中で無音が
+    落ちたり、符号化の遅れがずれとして残ったりしても気付けるようにするため。
+    """
+    subprocess.run(
+        [ffmpeg, "-hide_banner", "-v", "error", "-y", "-i", video_path,
+         "-t", str(seconds), "-ac", "1", "-c:a", "pcm_s16le", out_path],
+        check=True,
+        capture_output=True,
+    )
+    audio = read_wav(out_path)
+    loud = np.flatnonzero(np.abs(audio.samples) > 10 ** (-50 / 20))
+    assert len(loud), "動画の冒頭に音が入っていません"
+    return float(loud[0]) / audio.sample_rate

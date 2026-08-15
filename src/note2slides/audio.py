@@ -195,8 +195,14 @@ def export_narration(
         source=os.path.abspath(source),
         warnings=list(script.warnings),
     )
+    # 最初のスライドだけ、話し始めるまでの無音を長く取る(前にスライドが無く、
+    # 動画の再生が始まった直後にあたるため)。
+    first = min((s.index for s in script.segments), default=None)
     plans = {
-        s.index: plan_reading(s.text, options.reading, hold=s.hold) for s in script.segments
+        s.index: plan_reading(
+            s.text, options.reading, hold=s.hold, opening=(s.index == first)
+        )
+        for s in script.segments
     }
 
     os.makedirs(outdir, exist_ok=True)
@@ -379,7 +385,8 @@ def _assemble(
         if speech.sample_rate != rate:
             speech = wave_mod.resample(speech, rate)
         # エンジンが付ける前後の余白は長さがまちまちなので、いったん削って
-        # こちらで決めた長さの無音を入れ直す。
+        # こちらで決めた長さの無音を入れ直す(この余白は、最初と最後の拍を
+        # 痩せさせないために付けさせているもの。`voicevox.SYNTH_PADDING`)。
         speech = wave_mod.fade(wave_mod.trim_silence(speech))
         spoken[segment.index] = wave_mod.concat(
             [

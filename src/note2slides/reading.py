@@ -90,6 +90,11 @@ class ReadingStyle:
     clause_pause: float = 0.2  # 長い文を区切ったときの間
     line_pause: float = 0.6  # 行(段落・箇条書きの項目)の間
     lead_silence: float = 0.3  # スライドが切り替わってから話し始めるまで
+    #: 最初のスライドだけ、話し始めるまでをここまで延ばす。動画が始まった直後は
+    #: まだ画面を見ておらず、再生する側も音を出し始めたところなので、途中の
+    #: スライドと同じ間隔だと 1 音目を聞き逃す(2 枚目以降は前のスライドの
+    #: `tail_silence` が前にあるため、この問題は起きない)。
+    opening_silence: float = 1.0
     tail_silence: float = 0.7  # 話し終わってから次のスライドまで
     max_chars: int = 100  # これを超える文は読点で区切る
     terminate_sentences: bool = True  # 句点の無い行に句点を補う
@@ -97,7 +102,14 @@ class ReadingStyle:
     dictionary: Dict[str, str] = field(default_factory=dict)  # 読み方の置き換え
 
     def validate(self) -> None:
-        for name in ("sentence_pause", "clause_pause", "line_pause", "lead_silence", "tail_silence"):
+        for name in (
+            "sentence_pause",
+            "clause_pause",
+            "line_pause",
+            "lead_silence",
+            "opening_silence",
+            "tail_silence",
+        ):
             if getattr(self, name) < 0:
                 raise ValueError(f"間の長さは 0 以上にしてください: {name}={getattr(self, name)}")
         if self.max_chars < 10:
@@ -109,6 +121,7 @@ class ReadingStyle:
             "clause_pause": self.clause_pause,
             "line_pause": self.line_pause,
             "lead_silence": self.lead_silence,
+            "opening_silence": self.opening_silence,
             "tail_silence": self.tail_silence,
             "max_chars": self.max_chars,
         }
@@ -161,15 +174,22 @@ class ReadingPlan:
 
 
 def plan_reading(
-    text: str, style: Optional[ReadingStyle] = None, hold: float = 0.0
+    text: str,
+    style: Optional[ReadingStyle] = None,
+    hold: float = 0.0,
+    opening: bool = False,
 ) -> ReadingPlan:
     """原稿 1 枚分を、読み上げる単位と間に分ける。
 
     `hold` は読み終わったあとに足す無音(秒)。コードや図のように、聞くだけでは
     足りず画面を読む必要があるスライドで、読む時間を作るために使う。
+
+    `opening` は最初のスライドかどうか。前にスライドが無いぶん、話し始めるまでを
+    `opening_silence` まで延ばす(`ReadingStyle.opening_silence`)。
     """
     style = style or ReadingStyle()
-    plan = ReadingPlan(lead_silence=style.lead_silence)
+    lead = max(style.lead_silence, style.opening_silence) if opening else style.lead_silence
+    plan = ReadingPlan(lead_silence=lead)
     if not text or not text.strip():
         return plan
 

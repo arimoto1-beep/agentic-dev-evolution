@@ -178,6 +178,26 @@ def test_hold_extends_the_silence_after_the_last_utterance():
     assert plan_reading("画面のコマンドをご覧ください。", style).tail_silence == 0.7
 
 
+def test_first_slide_waits_longer_before_speaking():
+    """動画の 1 音目は、再生が始まった直後にあたるので間を長く取る。"""
+    style = ReadingStyle(lead_silence=0.3, opening_silence=1.0)
+
+    assert plan_reading("最初の文です。", style, opening=True).lead_silence == 1.0
+    assert plan_reading("最初の文です。", style).lead_silence == 0.3
+
+
+def test_opening_silence_is_never_shorter_than_a_normal_lead():
+    """途中のスライドより短い間で動画が始まることはない。"""
+    style = ReadingStyle(lead_silence=1.5, opening_silence=1.0)
+
+    assert plan_reading("最初の文です。", style, opening=True).lead_silence == 1.5
+
+
+def test_negative_opening_silence_is_rejected():
+    with pytest.raises(ValueError):
+        ReadingStyle(opening_silence=-0.1).validate()
+
+
 def test_full_width_alphanumerics_are_normalized():
     plan = plan_reading("ＡＩは１２３です。")
 

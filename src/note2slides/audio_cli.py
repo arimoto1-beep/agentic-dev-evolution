@@ -94,6 +94,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="スライドが変わってから話し始めるまでの無音(秒、既定: 0.3)",
     )
     reading_group.add_argument(
+        "--opening-silence",
+        type=float,
+        default=1.0,
+        help="最初のスライドで話し始めるまでの無音(秒、既定: 1.0)",
+    )
+    reading_group.add_argument(
         "--tail-silence",
         type=float,
         default=0.7,
@@ -280,6 +286,7 @@ def _audio_options(args) -> AudioOptions:
             sentence_pause=args.sentence_pause,
             line_pause=args.line_pause,
             lead_silence=args.lead_silence,
+            opening_silence=args.opening_silence,
             tail_silence=args.tail_silence,
             max_chars=args.max_chars,
             drop_urls=not args.read_urls,
