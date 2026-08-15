@@ -33,10 +33,17 @@ SAMPLE_RATE = 22050
 TONE_AMPLITUDE = 0.5
 
 
+def tone(seconds, sample_rate=SAMPLE_RATE, amplitude=TONE_AMPLITUDE):
+    t = np.arange(int(seconds * sample_rate)) / sample_rate
+    return np.round(amplitude * np.sin(2 * math.pi * 440 * t) * 32767).astype("<i2")
+
+
 def write_tone(path, seconds, sample_rate=SAMPLE_RATE, amplitude=TONE_AMPLITUDE):
     """読み上げの代わりになる、一定の大きさの音を書く。"""
-    t = np.arange(int(seconds * sample_rate)) / sample_rate
-    data = np.round(amplitude * np.sin(2 * math.pi * 440 * t) * 32767).astype("<i2")
+    write_samples(path, tone(seconds, sample_rate, amplitude), sample_rate)
+
+
+def write_samples(path, data, sample_rate=SAMPLE_RATE):
     with wave.open(str(path), "wb") as writer:
         writer.setnchannels(1)
         writer.setsampwidth(2)
@@ -50,7 +57,11 @@ def duration_of(path):
 
 
 class FakeEngine:
-    """読み上げの代わりに、文字数に比例した長さの音を書くエンジン。"""
+    """読み上げの代わりに、文字数に比例した長さの音を書くエンジン。
+
+    1 件はスライド 1 枚分なので、区切りごとの音と、その後ろの間(無音)を
+    つないだものを 1 本の WAV として書く(本物のエンジンと同じ形にする)。
+    """
 
     def __init__(self, name="fake", fail=(), sample_rate=SAMPLE_RATE, honors=True, amplitude=TONE_AMPLITUDE):
         self.name = name
@@ -79,17 +90,17 @@ class FakeEngine:
         report = SynthesisReport(
             voice=kwargs.get("voice", ""), command=["fake", "-JobFile", "job.json"]
         )
+        sample_rate = rate or self.sample_rate
         for job in jobs:
             if job.index in self.fail:
                 report.failures.append(SpeechFailure(job.index, "偽の失敗"))
                 continue
-            # 音量測定の区間(400ms)より短いと音量をそろえられないので下限を置く。
-            write_tone(
-                job.out_path,
-                max(0.6, 0.1 * len(job.text)),
-                rate or self.sample_rate,
-                self.amplitude,
-            )
+            parts = []
+            for piece in job.pieces:
+                # 音量測定の区間(400ms)より短いと音量をそろえられないので下限を置く。
+                parts.append(tone(max(0.6, 0.1 * len(piece.text)), sample_rate, self.amplitude))
+                parts.append(np.zeros(int(piece.pause_after * sample_rate), dtype="<i2"))
+            write_samples(job.out_path, np.concatenate(parts), sample_rate)
             if on_done:
                 on_done(job.index)
         return report
@@ -224,21 +235,40 @@ def test_script_without_any_text_needs_no_engine(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_sentences_are_synthesized_one_by_one(tmp_path):
-    """1 枚分をまとめて渡すと文の切れ目が詰まるため、文ごとに合成する。"""
+def test_a_slide_is_synthesized_as_one_continuous_reading(tmp_path):
+    """区切って別々に合成すると、区切りの先頭だけ音程が跳ね上がって聞こえる。
+
+    文の切れ目は「間」として渡し、読み上げそのものは 1 枚分を続けて行わせる。
+    """
     source = make_script(tmp_path, ["最初の文です。次の文です。", "別のスライドです。"])
+    engine = FakeEngine()
+
+    export_narration(
+        source,
+        str(tmp_path / "audio"),
+        AudioOptions(reading=ReadingStyle(sentence_pause=0.35)),
+        engine=engine,
+    )
+
+    jobs = engine.calls[0]["jobs"]
+    assert len(jobs) == 2  # スライド 1 枚につき 1 回
+    assert [[piece.text for piece in job.pieces] for job in jobs] == [
+        ["最初の文です。", "次の文です。"],
+        ["別のスライドです。"],
+    ]
+    # 文の間は読み上げの中に置く。最後の区切りの後ろには置かない。
+    assert [piece.pause_after for piece in jobs[0].pieces] == [0.35, 0.0]
+    # どの合成単位がどのスライドのものかを保持する(失敗時に枚数で示すため)。
+    assert [job.slide for job in jobs] == [1, 2]
+
+
+def test_silent_slides_are_not_sent_to_the_engine(tmp_path):
+    source = make_script(tmp_path, ["読み上げます。", "", "最後です。"])
     engine = FakeEngine()
 
     export_narration(source, str(tmp_path / "audio"), engine=engine)
 
-    jobs = engine.calls[0]["jobs"]
-    assert [job.text for job in jobs] == [
-        "最初の文です。",
-        "次の文です。",
-        "別のスライドです。",
-    ]
-    # どの合成単位がどのスライドのものかを保持する(失敗時に枚数で示すため)。
-    assert [job.slide for job in jobs] == [1, 1, 2]
+    assert [job.slide for job in engine.calls[0]["jobs"]] == [1, 3]
 
 
 def test_pauses_are_inserted_between_sentences(tmp_path):
@@ -521,15 +551,19 @@ def test_failure_names_the_slides(tmp_path):
     assert "-JobFile" in message
 
 
-def test_failure_points_at_the_slide_not_the_sentence(tmp_path):
-    """1 枚が複数の文に分かれていても、失敗はスライド番号で示す。"""
-    source = make_script(tmp_path, ["最初の文。次の文。三つ目の文。"])
+def test_failure_points_at_the_slide_not_the_synthesis_order(tmp_path):
+    """無音のスライドには合成を頼まないので、合成の順番と枚数はずれる。
+
+    失敗を追うのはスライド番号なので、ずれていても資料のどこを直せばよいかが
+    分かるようにする。
+    """
+    source = make_script(tmp_path, ["", "最初の文。次の文。"])
 
     with pytest.raises(AudioExportError) as excinfo:
-        export_narration(source, str(tmp_path / "audio"), engine=FakeEngine(fail=[3]))
+        export_narration(source, str(tmp_path / "audio"), engine=FakeEngine(fail=[1]))
 
     assert "1 枚分の音声を合成できませんでした" in str(excinfo.value)
-    assert "スライド 1" in str(excinfo.value)
+    assert "スライド 2" in str(excinfo.value)
 
 
 def test_workdir_is_kept_after_a_failure(tmp_path):

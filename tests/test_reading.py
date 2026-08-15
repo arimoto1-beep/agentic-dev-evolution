@@ -36,9 +36,11 @@ def test_pause_lengths_follow_the_structure():
     plan = plan_reading("一つ目。二つ目。\n別の行です。", style)
 
     assert texts(plan) == ["一つ目。", "二つ目。", "別の行です。"]
-    # 文の間は短く、行の間は長く、最後だけ次のスライドまでの間になる。
-    assert pauses(plan) == [0.3, 0.6, 0.9]
+    # 文の間は短く、行の間は長く取る。読み終わったあとの無音は読み上げの外側に
+    # あるので、最後の区切りの後ろには間を置かない。
+    assert pauses(plan) == [0.3, 0.6, 0.0]
     assert plan.lead_silence == 0.2
+    assert plan.tail_silence == 0.9
 
 
 def test_question_and_exclamation_end_a_sentence():
@@ -57,7 +59,7 @@ def test_closing_bracket_stays_with_its_sentence():
 def test_long_sentence_is_split_at_a_comma():
     long_sentence = "あ" * 60 + "、" + "い" * 60 + "。"
 
-    plan = plan_reading(long_sentence, ReadingStyle(max_chars=50, clause_pause=0.15))
+    plan = plan_reading(long_sentence, ReadingStyle(max_chars=50, clause_pause=0.15, tail_silence=0.7))
 
     assert len(plan.utterances) == 2
     assert plan.utterances[0].text.endswith("、")
@@ -172,8 +174,8 @@ def test_hold_extends_the_silence_after_the_last_utterance():
 
     plan = plan_reading("画面のコマンドをご覧ください。", style, hold=2.0)
 
-    assert pauses(plan) == [2.7]
-    assert plan_reading("画面のコマンドをご覧ください。", style).utterances[-1].pause_after == 0.7
+    assert plan.tail_silence == 2.7
+    assert plan_reading("画面のコマンドをご覧ください。", style).tail_silence == 0.7
 
 
 def test_full_width_alphanumerics_are_normalized():
@@ -205,6 +207,7 @@ def test_reading_is_recorded_for_review():
 
     assert plan.reading == "最初の文です。 次の文です。"
     assert plan.to_dict()["utterances"][0]["pause_after"] == pytest.approx(0.35)
+    assert plan.to_dict()["tail_silence"] == pytest.approx(0.7)
 
 
 # ---------------------------------------------------------------------------

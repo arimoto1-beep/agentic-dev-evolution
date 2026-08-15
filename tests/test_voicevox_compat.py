@@ -17,7 +17,7 @@ import pytest
 from note2slides import convert_file, export_narration
 from note2slides.audio import AudioOptions
 from note2slides.reading import ReadingStyle
-from note2slides.speech import SpeechError
+from note2slides.speech import SpeechError, SpeechJob, SpeechPiece
 from note2slides.voicevox import VoicevoxEngine, is_installed
 from note2slides.waveform import loudness_lufs, peak_dbfs, read_wav
 
@@ -112,8 +112,51 @@ def test_loudness_matches_the_target(tmp_path, engine):
         assert loudness_lufs(audio) == pytest.approx(-16.0, abs=3.0)
 
 
+def test_a_slide_is_read_as_one_continuous_utterance(tmp_path, engine):
+    """次の区切りの先頭が、文章の書き出しの音程にならないことを確かめる。
+
+    VOICEVOX は渡された文字列を 1 つの発話として扱い、その書き出しの音程を
+    高く取る。区切りごとに合成を頼むと、項目が変わるたびにその音程が現れ、
+    そこだけ音程と抑揚が跳ね上がって聞こえる。
+    """
+    first = "情報を一度スライドの単位に分け直す必要があります。"
+    second = "記事を見出しごとに分割する。"
+    workdir = tmp_path / "work"
+    style = engine.pick_style()
+
+    engine.synthesize(
+        [
+            SpeechJob(
+                index=1,
+                pieces=[SpeechPiece(first, 0.6), SpeechPiece(second)],
+                out_path=str(tmp_path / "out.wav"),
+                slide=1,
+            )
+        ],
+        str(workdir),
+        timeout=120,
+    )
+
+    # 実際に合成へ渡した音程を、下書きから読む。
+    with open(workdir / "query_0001.json", encoding="utf-8") as f:
+        phrases = json.load(f)["accent_phrases"]
+    alone = engine._accent_phrases(second, style.id, 60)
+    start = len(engine._accent_phrases(first, style.id, 60))
+
+    # 2 つ目の区切りの先頭の音程(対数なので、差がそのまま比になる)。
+    in_context = phrases[start]["moras"][0]["pitch"]
+    on_its_own = alone[0]["moras"][0]["pitch"]
+
+    assert on_its_own > in_context  # 単独だと書き出しの音程で高くなる
+    assert in_context == pytest.approx(phrases[0]["moras"][0]["pitch"], abs=0.25)
+    # 前の文の読み終わりからの段差が、書き出しの音程で始めるより小さいこと。
+    # 無声化した拍は音程を持たない(0)ので、声になっている最後の拍と比べる。
+    before = [m["pitch"] for p in phrases[:start] for m in p["moras"] if m["pitch"] > 0][-1]
+    assert abs(in_context - before) < abs(on_its_own - before)
+
+
 def test_sentences_get_a_pause_between_them(tmp_path, engine):
-    """文ごとに合成してつなぐので、間の長さの分だけ長くなる。"""
+    """間は読み上げの中に置くので、間の長さの分だけ長くなる。"""
     script = tmp_path / "script.json"
     script.write_text(
         json.dumps({"segments": [{"index": 1, "text": "最初の文です。次の文です。"}]}, ensure_ascii=False),

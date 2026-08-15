@@ -15,6 +15,9 @@
     honors_sample_rate()         標本化周波数を指定できるか
     synthesize(jobs, workdir...) まとめて合成し、1 件ごとの成否を返す
     close()                      後始末(起動したプロセスがあれば止める)
+
+1 件(SpeechJob)はスライド 1 枚分で、区切りと間(SpeechPiece)を並べたもの。
+エンジンは 1 件を続きとして読み上げ、間もその中に置いて 1 本の WAV にする。
 """
 
 from __future__ import annotations
@@ -102,18 +105,38 @@ class AudioFormat:
         }
 
 
+@dataclass(frozen=True)
+class SpeechPiece:
+    """続けて読み上げる 1 区切りと、その直後に置く間(秒)。
+
+    区切りは間を置く位置を決めるためのもので、読み上げそのものは区切らない。
+    """
+
+    text: str
+    pause_after: float = 0.0
+
+
 @dataclass
 class SpeechJob:
-    """1 回分の読み上げ。
+    """1 回分の読み上げ。1 枚のスライド分をまとめて 1 本の WAV にする。
 
-    index は合成単位の通し番号。1 枚のスライドが複数の単位に分かれることが
-    あるため、スライド番号とは別に持つ(slide に対応するスライド番号が入る)。
+    1 枚を区切って別々に合成すると、合成エンジンはそれぞれを文章の書き出しと
+    して扱うため、区切りの先頭だけ音程が跳ね上がって聞こえる。区切りと間は
+    pieces として渡し、続きとして読み上げさせる(間は読み上げの中に置く)。
+
+    index は合成単位の通し番号。読み上げる文章が無いスライドには合成そのものが
+    要らないため、スライド番号とは別に持つ(slide に対応するスライド番号が入る)。
     """
 
     index: int
-    text: str
+    pieces: List[SpeechPiece]
     out_path: str
     slide: int = 0
+
+    @property
+    def text(self) -> str:
+        """読み上げる文章(確認と失敗時の表示に使う)。"""
+        return "".join(piece.text for piece in self.pieces)
 
 
 @dataclass
@@ -129,6 +152,7 @@ class SynthesisReport:
     command: List[str] = field(default_factory=list)
     stdout: str = ""
     stderr: str = ""
+    warnings: List[str] = field(default_factory=list)  # 合成はできたが伝えたいこと
 
     @property
     def ok(self) -> bool:

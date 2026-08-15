@@ -7,6 +7,16 @@
 
     原稿(1 枚分の文章) --> ReadingPlan(読み上げる単位 + 各単位の後ろの無音)
 
+区切るのは「間の長さを決めるため」であって、「別々に合成するため」ではない。
+1 枚分は続けて読み上げる 1 本の発話として合成し、ここで決めた間はその中に
+置く(`audio.py`)。区切って別々に合成すると、合成エンジンは 1 つ 1 つを
+文章の書き出しとして扱うため、次の単位の先頭だけ音程が跳ね上がり、項目が
+切り替わるたびに読み直したように聞こえてしまう。
+
+そのため各単位の `pause_after` は「同じスライドの次の単位までの間」で、
+最後の単位は 0 になる。読み終わったあとの間はスライド全体のものなので
+`ReadingPlan.tail_silence` に分けて持つ。
+
 あわせて、読み上げに向かない文字を落とす。ここで行うのは次だけで、要約・
 言い換え・補足の生成は行わない。落としたもの・補ったものは ReadingPlan.notes に
 残し、`narration.json` からも確認できるようにする。
@@ -106,7 +116,11 @@ class ReadingStyle:
 
 @dataclass(frozen=True)
 class Utterance:
-    """1 回で読み上げる文字列と、その後ろに置く無音の長さ(秒)。"""
+    """1 区切り分の文字列と、同じスライドの次の区切りまでに置く無音(秒)。
+
+    最後の区切りの `pause_after` は 0 になる(読み終わったあとの無音は
+    `ReadingPlan.tail_silence`)。
+    """
 
     text: str
     pause_after: float
@@ -114,10 +128,16 @@ class Utterance:
 
 @dataclass
 class ReadingPlan:
-    """1 枚のスライド分の読み上げ計画。"""
+    """1 枚のスライド分の読み上げ計画。
+
+    `lead_silence` と `tail_silence` はスライドの前後に置く無音で、読み上げの
+    外側にある。`utterances` は続けて読み上げる中身で、その間だけが
+    `pause_after` になる。
+    """
 
     utterances: List[Utterance] = field(default_factory=list)
     lead_silence: float = 0.0
+    tail_silence: float = 0.0
     notes: List[str] = field(default_factory=list)
 
     @property
@@ -132,6 +152,7 @@ class ReadingPlan:
     def to_dict(self) -> dict:
         return {
             "lead_silence": round(self.lead_silence, 3),
+            "tail_silence": round(self.tail_silence, 3),
             "utterances": [
                 {"text": u.text, "pause_after": round(u.pause_after, 3)} for u in self.utterances
             ],
@@ -157,14 +178,16 @@ def plan_reading(
     if not lines:
         return plan
 
-    tail_silence = style.tail_silence + max(0.0, hold)
+    plan.tail_silence = style.tail_silence + max(0.0, hold)
     for line_number, line in enumerate(lines):
         pieces = _split_line(line, style)
         last_line = line_number == len(lines) - 1
         for piece_number, (piece, at_sentence_end) in enumerate(pieces):
             last_piece = piece_number == len(pieces) - 1
-            if last_piece:
-                pause = tail_silence if last_line else style.line_pause
+            if last_piece and last_line:
+                pause = 0.0  # 読み終わったあとの無音は tail_silence が持つ
+            elif last_piece:
+                pause = style.line_pause
             elif at_sentence_end:
                 pause = style.sentence_pause
             else:

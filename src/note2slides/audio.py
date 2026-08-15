@@ -1,7 +1,8 @@
 """ナレーション原稿を音声ファイル(WAV)に合成する。
 
     .pptx --(narration)--> 原稿 --(reading)--> 読み上げ単位 + 間
-                                    --(tts)--> 部品 --(waveform)--> narration_001.wav ...
+                                    --(tts)--> 1 枚分の読み上げ
+                               --(waveform)--> narration_001.wav ...
 
 出力はスライド画像と同じ規則で番号を振る。`slide_001.png` に対応する音声は
 `narration_001.wav` で、番号だけでスライドと音声の対応が分かる。
@@ -12,9 +13,15 @@
       ...
       narration.json   スライド番号・長さ・読み上げた文章の一覧
 
-合成エンジンに 1 枚分の文章をまとめて渡さず、文ごとに分けて合成してから
-つないでいるのは、文と文の間を自分で決めるため。エンジン任せだと間が詰まって
-早口に聞こえ、長時間のナレーションに耐えない。間の長さは `reading.py` が決める。
+文と文の間はこちらで決める。エンジン任せだと間が詰まって早口に聞こえ、
+長時間のナレーションに耐えない。間の長さは `reading.py` が決める。
+
+ただし、間ごとに合成を分けて音声をつなぐことはしない。合成エンジンは渡された
+文字列を 1 つの発話として扱うため、分けて頼むと区切りの先頭が毎回「文章の
+書き出し」の音程になり、文や箇条書きの項目が変わるたびにそこだけ音程と抑揚が
+跳ね上がって聞こえる。1 枚分は区切りと間を添えてまとめて渡し、間も読み上げの
+中に置いてもらう(`voicevox.py` は無音の拍として、`tts.py` は SSML の
+`<break>` として入れる)。ここで足すのは、スライドの前後に置く無音だけ。
 
 つないだあと、全ファイルに同じ音量補正をかける。ファイルごとにそろえると、
 静かなスライドだけが持ち上がってスライドごとに音量が動いて聞こえるため、
@@ -40,7 +47,7 @@ from . import tts as tts_mod
 from . import waveform as wave_mod
 from .narration import NarrationScript
 from .reading import ReadingPlan, ReadingStyle, plan_reading
-from .speech import AudioFormat, SpeechJob
+from .speech import AudioFormat, SpeechJob, SpeechPiece
 from .waveform import LoudnessAdjustment, Waveform
 
 MANIFEST_NAME = "narration.json"
@@ -262,34 +269,27 @@ def _synthesize(
 
     jobs: List[SpeechJob] = []
     owner: Dict[int, int] = {}  # 合成単位の通し番号 -> スライド番号
-    parts: Dict[tuple, str] = {}  # (スライド番号, 何番目の読み上げ単位か) -> WAV
+    parts: Dict[int, str] = {}  # スライド番号 -> 1 枚分の WAV
     for segment in script.segments:
         plan = plans[segment.index]
-        for position, utterance in enumerate(plan.utterances):
-            job_index = len(jobs) + 1
-            out_path = os.path.join(workdir, f"part_{job_index:04d}.wav")
-            jobs.append(
-                SpeechJob(
-                    index=job_index,
-                    text=utterance.text,
-                    out_path=out_path,
-                    slide=segment.index,
-                )
+        if plan.is_empty:
+            continue
+        job_index = len(jobs) + 1
+        out_path = os.path.join(workdir, f"part_{job_index:04d}.wav")
+        jobs.append(
+            SpeechJob(
+                index=job_index,
+                pieces=[SpeechPiece(u.text, u.pause_after) for u in plan.utterances],
+                out_path=out_path,
+                slide=segment.index,
             )
-            owner[job_index] = segment.index
-            parts[(segment.index, position)] = out_path
-
-    # 1 枚分がすべて終わってから進捗を出す(スライド単位で見た方が分かりやすい)。
-    remaining = {index: 0 for index in plans}
-    for job in jobs:
-        remaining[job.slide] += 1
+        )
+        owner[job_index] = segment.index
+        parts[segment.index] = out_path
 
     def on_done(job_index: int) -> None:
         slide = owner.get(job_index)
-        if slide is None:
-            return
-        remaining[slide] -= 1
-        if remaining[slide] == 0 and on_progress:
+        if slide is not None and on_progress:
             on_progress(slide)
 
     report = engine.synthesize(
@@ -307,6 +307,7 @@ def _synthesize(
     if report.voice:
         result.voice = report.voice
     result.credit = _credit_of(engine, result.voice)
+    result.warnings.extend(report.warnings)
 
     if report.failures:
         result.workdir = workdir
@@ -355,15 +356,17 @@ def _failure_message(report, workdir: str, script: NarrationScript, owner: Dict[
 def _assemble(
     script: NarrationScript,
     plans: Dict[int, ReadingPlan],
-    parts: Dict[tuple, str],
+    parts: Dict[int, str],
     outdir: str,
     options: AudioOptions,
     result: NarrationResult,
     on_progress: Optional[Callable[[int], None]],
 ) -> None:
-    """合成した部品を間を置いてつなぎ、音量をそろえて書き出す。
+    """1 枚分の読み上げに前後の無音を付け、音量をそろえて書き出す。
 
-    parts は (スライド番号, 何番目の読み上げ単位か) から合成済み WAV への対応。
+    parts はスライド番号から合成済み WAV への対応。文と文の間は読み上げの中に
+    入っている(そこで切ってつなぐと、つなぎ目だけ音程が変わって聞こえる)ため、
+    ここで足すのはスライドの前後の無音だけ。
     """
     rate = options.sample_rate
     spoken: Dict[int, Waveform] = {}
@@ -372,16 +375,20 @@ def _assemble(
         plan = plans[segment.index]
         if plan.is_empty:
             continue
-        pieces: List[Waveform] = [wave_mod.silence(plan.lead_silence, rate)]
-        for position, utterance in enumerate(plan.utterances):
-            piece = wave_mod.read_wav(parts[(segment.index, position)])
-            if piece.sample_rate != rate:
-                piece = wave_mod.resample(piece, rate)
-            # エンジンが付ける前後の余白は長さがまちまちなので、いったん削って
-            # こちらで決めた長さの無音を入れ直す。
-            pieces.append(wave_mod.fade(wave_mod.trim_silence(piece)))
-            pieces.append(wave_mod.silence(utterance.pause_after, rate))
-        spoken[segment.index] = wave_mod.concat(pieces, rate)
+        speech = wave_mod.read_wav(parts[segment.index])
+        if speech.sample_rate != rate:
+            speech = wave_mod.resample(speech, rate)
+        # エンジンが付ける前後の余白は長さがまちまちなので、いったん削って
+        # こちらで決めた長さの無音を入れ直す。
+        speech = wave_mod.fade(wave_mod.trim_silence(speech))
+        spoken[segment.index] = wave_mod.concat(
+            [
+                wave_mod.silence(plan.lead_silence, rate),
+                speech,
+                wave_mod.silence(plan.tail_silence, rate),
+            ],
+            rate,
+        )
 
     spoken = _adjust_loudness(spoken, options, result)
 

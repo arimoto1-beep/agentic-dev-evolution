@@ -15,8 +15,10 @@ from note2slides.tts import (
     SpeechEngine,
     SpeechJob,
     SpeechNotAvailableError,
+    SpeechPiece,
     SynthesisError,
     Voice,
+    build_ssml,
 )
 
 
@@ -206,7 +208,7 @@ def test_voice_language_match():
 
 def _jobs(tmp_path, count=2):
     return [
-        SpeechJob(i, f"{i} 枚目の読み上げ", str(tmp_path / f"out_{i}.wav"))
+        SpeechJob(i, [SpeechPiece(f"{i} 枚目の読み上げ")], str(tmp_path / f"out_{i}.wav"), slide=i)
         for i in range(1, count + 1)
     ]
 
@@ -241,7 +243,39 @@ def test_job_file_carries_text_as_utf8(fake_powershell, tmp_path, monkeypatch):
     text_file = job["items"][0]["text_file"]
     with open(text_file, encoding="utf-8") as f:
         assert f.read() == "1 枚目の読み上げ"
+    # SSML も添える(間を読み上げの中に置くため。扱えない音声では素の方に戻す)。
+    with open(job["items"][0]["ssml_file"], encoding="utf-8") as f:
+        assert "1 枚目の読み上げ" in f.read()
     assert "-JobFile" in commands[0]
+
+
+# ---------------------------------------------------------------------------
+# SSML
+# ---------------------------------------------------------------------------
+
+
+def test_pauses_become_breaks_inside_one_utterance():
+    """区切って別々に合成すると、区切りの先頭だけ音程が跳ね上がって聞こえる。
+
+    間は SSML の break として 1 回の発話の中に置き、ひと続きに読ませる。
+    """
+    ssml = build_ssml([SpeechPiece("最初の文です。", 0.35), SpeechPiece("次の文です。", 0.0)])
+
+    assert ssml.count("<speak") == 1
+    assert "最初の文です。<break time=\"350ms\"/>次の文です。</speak>" in ssml
+    assert ssml.count("<break") == 1  # 最後の区切りの後ろには置かない
+
+
+def test_ssml_uses_the_language_of_the_voice():
+    assert 'xml:lang="ja-JP"' in build_ssml([SpeechPiece("あ")])
+    assert 'xml:lang="en-US"' in build_ssml([SpeechPiece("a")], "en-US")
+
+
+def test_ssml_escapes_the_text():
+    """記事に出てくる記号が、そのままだと XML として壊れてしまう。"""
+    ssml = build_ssml([SpeechPiece("a<b & c>d")])
+
+    assert "a&lt;b &amp; c&gt;d" in ssml
 
 
 def test_failed_items_are_reported_individually(fake_powershell, tmp_path, monkeypatch):

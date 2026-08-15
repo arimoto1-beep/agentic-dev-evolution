@@ -12,12 +12,23 @@ VOICEVOX ENGINE はローカルの HTTP サーバとして動く。既に起動�
 それに接続し、起動していなければ `run.exe` を探して起動する(自分で起動した
 場合だけ、終了時に止める)。
 
-    GET  /version                            動いているかの確認
-    GET  /speakers                           話者とスタイルの一覧
-    POST /audio_query?text=...&speaker=ID    読みと抑揚の下書きを作る
-    POST /synthesis?speaker=ID               下書きから WAV を作る
+    GET  /version                               動いているかの確認
+    GET  /speakers                              話者とスタイルの一覧
+    POST /accent_phrases?text=...&speaker=ID    文字列を読み(アクセント句)にする
+    POST /mora_data?speaker=ID                  アクセント句の長さと音程を決める
+    POST /synthesis?speaker=ID                  下書きから WAV を作る
 
-`audio_query` を経由するのは、話す速さや抑揚をこちらで調整するため。
+読みと音程を分けて作るのは、スライド 1 枚分を「続きとして」読み上げさせるため。
+VOICEVOX は渡された文字列を 1 つの発話として扱い、その書き出しの音程を高く取る。
+文や箇条書きの項目ごとに別々の合成を頼むと、項目が変わるたびに書き出しの音程が
+現れ、そこだけ音程と抑揚が跳ね上がって聞こえる。
+
+そこで区切りごとに `/accent_phrases` で読みを作り、それを 1 枚分つないでから
+`/mora_data` で音程を決める。音程は前後のアクセント句を見て決まるため、
+つないでから頼むとスライド 1 枚が地続きの読み方になる。区切りに置く間は、
+音程が決まったあとでアクセント句の `pause_mora`(無音の拍)として入れる。
+こうすると間は保ったまま、間の前後がひと続きの発話になる。
+
 合成に渡した下書きは作業ディレクトリに残すので、失敗したときは同じ内容を
 そのまま再送して確認できる。
 
@@ -43,6 +54,7 @@ from .speech import (
     SpeechFailure,
     SpeechJob,
     SpeechNotAvailableError,
+    SpeechPiece,
     SynthesisError,
     SynthesisReport,
     Voice,
@@ -450,20 +462,18 @@ class VoicevoxEngine:
         intonation: float,
         timeout: float,
     ) -> None:
-        query = self._audio_query(job.text, style.id, timeout)
-        query.update(
-            {
-                "speedScale": float(speed),
-                "pitchScale": float(pitch),
-                "intonationScale": float(intonation),
-                "volumeScale": max(0.0, min(1.0, volume / 100.0)),
-                # 前後の余白は音声を組み立てるときに入れ直すため、ここでは付けない。
-                "prePhonemeLength": 0.0,
-                "postPhonemeLength": 0.0,
-                "outputSamplingRate": int(sample_rate or DEFAULT_SAMPLE_RATE),
-                "outputStereo": False,
-            }
-        )
+        query = {
+            "accent_phrases": self._read_continuously(job.pieces, style.id, speed, timeout),
+            "speedScale": float(speed),
+            "pitchScale": float(pitch),
+            "intonationScale": float(intonation),
+            "volumeScale": max(0.0, min(1.0, volume / 100.0)),
+            # 前後の余白は音声を組み立てるときに入れ直すため、ここでは付けない。
+            "prePhonemeLength": 0.0,
+            "postPhonemeLength": 0.0,
+            "outputSamplingRate": int(sample_rate or DEFAULT_SAMPLE_RATE),
+            "outputStereo": False,
+        }
         # 失敗したときに同じ内容を送り直せるよう、下書きを残す。
         query_path = os.path.join(workdir, f"query_{job.index:04d}.json")
         with open(query_path, "w", encoding="utf-8") as f:
@@ -476,16 +486,92 @@ class VoicevoxEngine:
         with open(job.out_path, "wb") as f:
             f.write(wav)
 
-    def _audio_query(self, text: str, style_id: int, timeout: float) -> dict:
+    def _read_continuously(
+        self, pieces: Sequence[SpeechPiece], style_id: int, speed: float, timeout: float
+    ) -> List[dict]:
+        """1 枚分の区切りを、ひと続きに読み上げるアクセント句の並びにする。
+
+        区切りごとに読みを作ってからつなぎ、音程は 1 枚分まとめて決める。
+        こうしないと、区切りの先頭が毎回「文章の書き出し」の音程になる。
+        """
+        groups = [self._accent_phrases(piece.text, style_id, timeout) for piece in pieces]
+        combined = [phrase for group in groups for phrase in group]
+        if not combined:
+            raise HttpFailure(
+                f"{self.base_url}/accent_phrases",
+                f"読み上げられる文字がありませんでした: {''.join(p.text for p in pieces)!r}",
+            )
+
+        combined = self._mora_data(combined, style_id, timeout)
+        _place_pauses(combined, [len(group) for group in groups], [p.pause_after for p in pieces], speed)
+        return combined
+
+    def _accent_phrases(self, text: str, style_id: int, timeout: float) -> List[dict]:
         query = urllib.parse.urlencode({"text": text, "speaker": style_id})
-        raw = _request(f"{self.base_url}/audio_query?{query}", data=b"", timeout=timeout)
-        try:
-            data = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise HttpFailure(f"{self.base_url}/audio_query", f"読みを取得できません: {exc}") from exc
-        if not isinstance(data, dict):
-            raise HttpFailure(f"{self.base_url}/audio_query", "読みの形式が想定と違います")
+        url = f"{self.base_url}/accent_phrases?{query}"
+        data = _json_response(url, _request(url, data=b"", timeout=timeout), "読み")
+        if not isinstance(data, list):
+            raise HttpFailure(url, "読みの形式が想定と違います")
         return data
+
+    def _mora_data(self, phrases: List[dict], style_id: int, timeout: float) -> List[dict]:
+        """つないだアクセント句の長さと音程を、前後を見て決め直す。"""
+        url = f"{self.base_url}/mora_data?speaker={style_id}"
+        payload = json.dumps(phrases, ensure_ascii=False).encode("utf-8")
+        data = _json_response(url, _request(url, payload, timeout), "音程")
+        if not isinstance(data, list) or len(data) != len(phrases):
+            raise HttpFailure(url, "音程の形式が想定と違います")
+        return data
+
+
+def _json_response(url: str, raw: bytes, what: str) -> object:
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HttpFailure(url, f"{what}を取得できません: {exc}") from exc
+
+
+def _place_pauses(
+    phrases: List[dict], lengths: Sequence[int], pauses: Sequence[float], speed: float
+) -> None:
+    """区切りの終わりに、指定した長さの無音を置く(その場で書き換える)。
+
+    間はアクセント句の `pause_mora`(無音の拍)として入れる。音程を決めたあとに
+    入れるのは、間の長さを読み方に影響させないため(間を置くこと自体は、
+    ひと続きの読み上げの中の息継ぎとして扱われる)。
+
+    最後の区切りの後ろには置かない。スライドを読み終えたあとの無音は音声を
+    組み立てる側(`audio.py`)が付ける。
+
+    VOICEVOX は合成時にすべての長さを speedScale で割るため、指定した速さでも
+    間が変わらないよう、あらかじめ掛けておく。
+    """
+    end = 0
+    boundary: Optional[int] = None  # 間を置ける最後の位置(直前の区切りの終わり)
+    pending = 0.0
+    for length, pause in zip(lengths, pauses):
+        if length:
+            # 次の読みが始まるまでに溜まった間を、直前の区切りの終わりに置く。
+            if boundary is not None:
+                phrases[boundary]["pause_mora"] = (
+                    _pause_mora(pending * max(speed, 0.0)) if pending > 0 else None
+                )
+            end += length
+            boundary = end - 1
+            pending = 0.0
+        # 読みが 1 つも作られなかった区切り(記号だけなど)の間は、次に持ち越す。
+        pending += max(0.0, pause)
+
+
+def _pause_mora(seconds: float) -> dict:
+    return {
+        "text": "、",
+        "consonant": None,
+        "consonant_length": None,
+        "vowel": "pau",
+        "vowel_length": float(seconds),
+        "pitch": 0.0,
+    }
 
 
 def _split_url(url: str) -> tuple[str, int]:

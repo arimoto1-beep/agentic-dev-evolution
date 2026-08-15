@@ -6,11 +6,12 @@
 # 結果は 1 行 1 件の JSON で標準出力に出す(note2slides.tts が読む)。
 #   {"kind":"voice","name":...,"language":...,"gender":...}
 #   {"kind":"engine","engine":...,"voice":...}
-#   {"kind":"done","index":1,"ok":true}
+#   {"kind":"done","index":1,"ok":true,"ssml":true}
 #   {"kind":"done","index":2,"ok":false,"error":"..."}
 #
 # 1 件ごとに成否を出すので、途中で失敗しても残りは合成され、どれが失敗したかが
-# 分かる。job.json の形式は note2slides/tts.py を参照。
+# 分かる。ssml は、区切りの間を入れた SSML で読み上げられたか(扱えない音声では
+# 素のテキストに戻すので false になる)。job.json の形式は note2slides/tts.py を参照。
 
 param(
     [string]$JobFile = "",
@@ -57,12 +58,19 @@ function Invoke-Sapi($job) {
     Write-Line @{ kind = "engine"; engine = "sapi"; voice = $synth.Voice.Name }
 
     foreach ($item in $job.items) {
+        $ssml = $false
         try {
-            $text = Read-Utf8 $item.text_file
             $synth.SetOutputToWaveFile($item.out_file, $format)
-            $synth.Speak($text)
+            # SSML で読み上げると、区切りの間を発話の中に置けるので 1 枚分が
+            # ひと続きになる。扱えない音声もあるため、駄目なら素のテキストに戻す。
+            try {
+                $synth.SpeakSsml((Read-Utf8 $item.ssml_file))
+                $ssml = $true
+            } catch {
+                $synth.Speak((Read-Utf8 $item.text_file))
+            }
             $synth.SetOutputToNull()
-            Write-Line @{ kind = "done"; index = $item.index; ok = $true }
+            Write-Line @{ kind = "done"; index = $item.index; ok = $true; ssml = $ssml }
         } catch {
             # 出力先を開いたままだと次の 1 件も巻き込んで失敗する。
             try { $synth.SetOutputToNull() } catch { }
@@ -119,9 +127,15 @@ function Invoke-OneCore($job) {
 
     $streamType = [Windows.Media.SpeechSynthesis.SpeechSynthesisStream]
     foreach ($item in $job.items) {
+        $ssml = $false
         try {
-            $text = Read-Utf8 $item.text_file
-            $stream = Wait-WinRt $synth.SynthesizeTextToStreamAsync($text) $streamType
+            # SSML で読み上げると、区切りの間を発話の中に置ける(SAPI と同じ理由)。
+            try {
+                $stream = Wait-WinRt $synth.SynthesizeSsmlToStreamAsync((Read-Utf8 $item.ssml_file)) $streamType
+                $ssml = $true
+            } catch {
+                $stream = Wait-WinRt $synth.SynthesizeTextToStreamAsync((Read-Utf8 $item.text_file)) $streamType
+            }
             $reader = New-Object Windows.Storage.Streams.DataReader($stream)
             Wait-WinRt $reader.LoadAsync([uint32]$stream.Size) ([uint32]) | Out-Null
             $bytes = New-Object byte[] $stream.Size
@@ -129,7 +143,7 @@ function Invoke-OneCore($job) {
             [System.IO.File]::WriteAllBytes($item.out_file, $bytes)
             $reader.Dispose()
             $stream.Dispose()
-            Write-Line @{ kind = "done"; index = $item.index; ok = $true }
+            Write-Line @{ kind = "done"; index = $item.index; ok = $true; ssml = $ssml }
         } catch {
             Write-Line @{ kind = "done"; index = $item.index; ok = $false; error = $_.Exception.Message }
         }

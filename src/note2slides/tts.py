@@ -33,6 +33,7 @@ from .speech import (
     SpeechFailure,
     SpeechJob,
     SpeechNotAvailableError,
+    SpeechPiece,
     SynthesisError,
     SynthesisReport,
     Voice,
@@ -48,6 +49,7 @@ __all__ = [
     "SpeechFailure",
     "SpeechJob",
     "SpeechNotAvailableError",
+    "SpeechPiece",
     "SynthesisError",
     "SynthesisReport",
     "Voice",
@@ -65,6 +67,8 @@ ENGINE_AUTO = "auto"
 ONECORE_SAMPLE_RATE = 16000
 #: SAPI は形式を指定できる。動画の音声トラックに合わせて 48kHz を既定にする。
 SAPI_SAMPLE_RATE = 48000
+#: SSML に書く言語。選んだ音声の言語が分からない場合に使う。
+DEFAULT_SSML_LANGUAGE = "ja-JP"
 
 _SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "speech.ps1")
 
@@ -273,6 +277,20 @@ class SpeechEngine:
                 report.failures.append(failure)
             elif on_done:
                 on_done(job.index)
+
+        # SSML で読めなかった場合は素のテキストに戻っている。合成自体は成功して
+        # いるので止めないが、間が入らないことを伝える。
+        plain = sorted(
+            job.slide
+            for job in jobs
+            if len(job.pieces) > 1 and done.get(job.index, {}).get("ssml") is False
+        )
+        if plain:
+            report.warnings.append(
+                f"{self.name} の音声が SSML を扱えないため、{len(plain)} 枚分は"
+                "文と文の間を入れずに読み上げました"
+                f"(スライド {', '.join(str(n) for n in plain)})。"
+            )
         return report
 
     # -- 内部 -----------------------------------------------------------
@@ -301,16 +319,25 @@ class SpeechEngine:
 
         文章は 1 件ずつ UTF-8 のテキストにして渡す。コマンドライン引数に日本語を
         載せると、環境の文字コードによっては壊れるため。
+
+        1 件は SSML と素のテキストの両方で書く。SSML なら区切りの間を
+        `<break>` として読み上げの中に置けるので、1 枚分がひと続きの発話になる。
+        SSML を扱えない音声のために、間を落とした素のテキストも添えておく。
         """
+        language = self._language_of(voice)
         items = []
         for job in jobs:
             text_path = os.path.join(workdir, f"text_{job.index:04d}.txt")
             with open(text_path, "w", encoding="utf-8") as f:
                 f.write(job.text)
+            ssml_path = os.path.join(workdir, f"text_{job.index:04d}.xml")
+            with open(ssml_path, "w", encoding="utf-8") as f:
+                f.write(build_ssml(job.pieces, language))
             items.append(
                 {
                     "index": job.index,
                     "text_file": os.path.abspath(text_path),
+                    "ssml_file": os.path.abspath(ssml_path),
                     "out_file": os.path.abspath(job.out_path),
                 }
             )
@@ -328,6 +355,14 @@ class SpeechEngine:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         return os.path.abspath(path)
+
+    def _language_of(self, voice: Optional[str]) -> str:
+        """SSML に書く言語。選んだ音声と食い違うと別の音声で読まれてしまう。"""
+        if voice:
+            for candidate in self._voices or []:
+                if candidate.name == voice and candidate.language:
+                    return candidate.language
+        return DEFAULT_SSML_LANGUAGE
 
     def _run(self, command: List[str], timeout: float) -> subprocess.CompletedProcess:
         try:
@@ -370,6 +405,29 @@ def _parse_lines(stdout: str) -> List[dict]:
         if isinstance(data, dict):
             items.append(data)
     return items
+
+
+def build_ssml(pieces: Sequence[SpeechPiece], language: str = DEFAULT_SSML_LANGUAGE) -> str:
+    """区切りと間を SSML にする。
+
+    間を `<break>` として読み上げの中に置くことで、1 枚分が 1 回の発話になる。
+    区切りごとに合成を分けると、合成エンジンはそれぞれを文章の書き出しとして
+    扱うため、区切りの先頭だけ音程が跳ね上がって聞こえる。
+    """
+    body = []
+    for piece in pieces:
+        body.append(_xml_escape(piece.text))
+        if piece.pause_after > 0:
+            body.append(f'<break time="{round(piece.pause_after * 1000)}ms"/>')
+    return (
+        '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
+        f'xml:lang="{_xml_escape(language or DEFAULT_SSML_LANGUAGE)}">'
+        f"{''.join(body)}</speak>"
+    )
+
+
+def _xml_escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
 def sapi_rate(speed: float) -> int:

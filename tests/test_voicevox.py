@@ -6,13 +6,19 @@
 
 import json
 import os
+import urllib.parse
 import wave
 
 import numpy as np
 import pytest
 
 from note2slides import voicevox
-from note2slides.speech import SpeechJob, SpeechNotAvailableError, SynthesisError
+from note2slides.speech import (
+    SpeechJob,
+    SpeechNotAvailableError,
+    SpeechPiece,
+    SynthesisError,
+)
 from note2slides.voicevox import Style, VoicevoxEngine
 
 SPEAKERS = [
@@ -32,17 +38,19 @@ SPEAKERS = [
     },
 ]
 
-QUERY = {
-    "accent_phrases": [],
-    "speedScale": 1.0,
-    "pitchScale": 0.0,
-    "intonationScale": 1.0,
-    "volumeScale": 1.0,
-    "prePhonemeLength": 0.1,
-    "postPhonemeLength": 0.1,
-    "outputSamplingRate": 24000,
-    "outputStereo": False,
-}
+def mora(text, pitch=5.5):
+    return {
+        "text": text,
+        "consonant": None,
+        "consonant_length": None,
+        "vowel": "a",
+        "vowel_length": 0.1,
+        "pitch": pitch,
+    }
+
+
+def phrase(text, pitch=5.5):
+    return {"moras": [mora(text, pitch)], "accent": 1, "pause_mora": None, "is_interrogative": False}
 
 
 def wav_bytes(seconds=0.5, sample_rate=48000, path=None):
@@ -58,11 +66,21 @@ def wav_bytes(seconds=0.5, sample_rate=48000, path=None):
 
 
 class FakeHttp:
-    """/version /speakers /audio_query /synthesis に答える差し替え。"""
+    """/version /speakers /accent_phrases /mora_data /synthesis に答える差し替え。
+
+    読みは「1 文字 = 1 アクセント句」にする。どの区切りがどのアクセント句に
+    なったかが数で追えるので、間を置いた位置を確かめられる。
+    """
+
+    #: 別々に読みを作ったときの音程。区切りの先頭が高くなる本物の挙動をまねる。
+    ALONE_PITCH = 6.0
+    #: つないでから決め直したときの音程。
+    JOINED_PITCH = 5.5
 
     def __init__(self, fail_on=None, missing=False):
         self.calls = []
         self.payloads = []
+        self.mora_data_calls = []
         self.fail_on = fail_on or ()
         self.missing = missing
 
@@ -76,10 +94,19 @@ class FakeHttp:
             return json.dumps(SPEAKERS).encode("utf-8")
         if "/initialize_speaker" in url:
             return b""
-        if "/audio_query" in url:
+        if "/accent_phrases" in url:
             if any(bad in url for bad in self.fail_on):
                 raise voicevox.HttpFailure(url, "読みを作れません", 422, '{"detail":"だめ"}')
-            return json.dumps(QUERY).encode("utf-8")
+            text = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["text"][0]
+            return json.dumps(
+                [phrase(c, self.ALONE_PITCH) for c in text if not c.isspace()]
+            ).encode("utf-8")
+        if "/mora_data" in url:
+            phrases = json.loads(data.decode("utf-8"))
+            self.mora_data_calls.append(phrases)
+            return json.dumps(
+                [phrase(p["moras"][0]["text"], self.JOINED_PITCH) for p in phrases]
+            ).encode("utf-8")
         if "/synthesis" in url:
             self.payloads.append(json.loads(data.decode("utf-8")))
             return wav_bytes()
@@ -224,9 +251,22 @@ def test_missing_speakers_is_an_error(engine, monkeypatch):
 
 
 def jobs_in(tmp_path, texts):
+    """1 件 = 1 区切りの単純な指示(間の扱いは pieces_in で確かめる)。"""
     return [
-        SpeechJob(index=i, text=text, out_path=str(tmp_path / f"part_{i}.wav"), slide=i)
+        SpeechJob(index=i, pieces=[SpeechPiece(text)], out_path=str(tmp_path / f"part_{i}.wav"), slide=i)
         for i, text in enumerate(texts, start=1)
+    ]
+
+
+def job_with(tmp_path, pieces):
+    return SpeechJob(index=1, pieces=pieces, out_path=str(tmp_path / "part_1.wav"), slide=1)
+
+
+def pauses_in(payload):
+    """合成に渡したアクセント句ごとの間(無い場合は None)。"""
+    return [
+        (p["pause_mora"]["vowel_length"] if p["pause_mora"] else None)
+        for p in payload["accent_phrases"]
     ]
 
 
@@ -239,6 +279,68 @@ def test_each_job_becomes_a_wav(engine, tmp_path, http):
     assert all(os.path.isfile(job.out_path) for job in jobs)
     assert report.voice == "No.7/アナウンス"
     assert sum("/synthesis" in url for url in http.calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# ひと続きの読み上げ
+# ---------------------------------------------------------------------------
+
+
+def test_a_job_is_synthesized_as_one_continuous_reading(engine, tmp_path, http):
+    """区切りごとに合成を分けると、区切りの先頭が「書き出し」の音程になる。
+
+    読みは区切りごとに作るが、音程はつないでから決め直し、合成は 1 回にする。
+    """
+    engine.synthesize([job_with(tmp_path, [SpeechPiece("あい", 0.5), SpeechPiece("うえ")])],
+                      str(tmp_path / "work"), timeout=30)
+
+    assert sum("/synthesis" in url for url in http.calls) == 1
+    # 音程は 1 枚分をまとめて決め直す(前後のアクセント句を見て決まるため)。
+    assert len(http.mora_data_calls) == 1
+    assert [p["moras"][0]["text"] for p in http.mora_data_calls[0]] == ["あ", "い", "う", "え"]
+    pitches = [p["moras"][0]["pitch"] for p in http.payloads[0]["accent_phrases"]]
+    assert pitches == [FakeHttp.JOINED_PITCH] * 4  # 別々に作ったときの音程は使わない
+
+
+def test_pauses_are_placed_inside_the_reading(engine, tmp_path, http):
+    engine.synthesize([job_with(tmp_path, [SpeechPiece("あい", 0.5), SpeechPiece("うえ")])],
+                      str(tmp_path / "work"), timeout=30)
+
+    # 1 つ目の区切りの終わり(2 つ目のアクセント句)にだけ間が入る。
+    # 最後の区切りの後ろには入れない(スライドの前後の無音は audio.py が付ける)。
+    assert pauses_in(http.payloads[0]) == [None, 0.5, None, None]
+
+
+def test_pauses_keep_their_length_at_other_speeds(engine, tmp_path, http):
+    """VOICEVOX は合成時にすべての長さを speedScale で割る。"""
+    engine.synthesize(
+        [job_with(tmp_path, [SpeechPiece("あ", 0.5), SpeechPiece("い")])],
+        str(tmp_path / "work"),
+        speed=0.5,
+        timeout=30,
+    )
+
+    # 0.25 秒と指定 -> 0.5 で割られて 0.5 秒になる。
+    assert pauses_in(http.payloads[0]) == [0.25, None]
+
+
+def test_a_piece_without_a_reading_hands_its_pause_over(engine, tmp_path, http):
+    """記号だけの区切りは読みにならないので、間は次の区切りの前にまとめる。"""
+    engine.synthesize(
+        [job_with(tmp_path, [SpeechPiece("あ", 0.3), SpeechPiece("  ", 0.4), SpeechPiece("い")])],
+        str(tmp_path / "work"),
+        timeout=30,
+    )
+
+    assert pauses_in(http.payloads[0]) == [pytest.approx(0.7), None]
+
+
+def test_a_job_without_any_reading_is_reported(engine, tmp_path):
+    """読み上げられる文字が無いまま合成を頼むと、何も返らず原因が分からない。"""
+    report = engine.synthesize([job_with(tmp_path, [SpeechPiece("   ")])], str(tmp_path / "work"))
+
+    assert [f.index for f in report.failures] == [1]
+    assert "読み上げられる文字がありません" in report.failures[0].message
 
 
 def test_speech_settings_are_sent(engine, tmp_path, http):
@@ -280,7 +382,7 @@ def test_query_is_kept_for_reproducing_a_failure(engine, tmp_path):
 
 
 def test_one_failure_does_not_stop_the_rest(monkeypatch, tmp_path):
-    fake = FakeHttp(fail_on=["%E3%81%84"])  # 2 件目(「い。」)だけ失敗させる
+    fake = FakeHttp(fail_on=["%E3%81%84"])  # 2 件目(「い。」)の読みだけ失敗させる
     monkeypatch.setattr(voicevox, "_request", fake)
     engine = VoicevoxEngine(autostart=False)
     jobs = jobs_in(tmp_path, ["あ。", "い。", "う。"])
