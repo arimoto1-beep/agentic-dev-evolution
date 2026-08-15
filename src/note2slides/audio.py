@@ -478,7 +478,12 @@ def _write_manifest(outdir: str, options: AudioOptions, result: NarrationResult)
         "engine": result.engine,
         "voice": result.voice,
         "credit": result.credit,
+        # 声の指定は、あとから同じ音声を作り直せるようにすべて残す
+        # (どの設定で合成したものかは、聞いただけでは分からない)。
         "speed": options.speed,
+        "pitch": options.pitch,
+        "intonation": options.intonation,
+        "volume": options.volume,
         "format": result.audio_format.to_dict() if result.audio_format else {},
         "loudness": result.loudness.to_dict() if result.loudness else None,
         "reading": options.reading.to_dict(),

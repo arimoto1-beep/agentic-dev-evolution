@@ -26,6 +26,7 @@ note2slides = "note2slides.cli:main"
 note2slides-images = "note2slides.images_cli:main"
 note2slides-audio = "note2slides.audio_cli:main"
 note2slides-video = "note2slides.video_cli:main"
+note2slides-voices = "note2slides.voice_compare_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
