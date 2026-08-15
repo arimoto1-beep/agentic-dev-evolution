@@ -8,6 +8,17 @@ Windows 標準の音声合成でも文章は読み上げられるが、声の作
     * 話す速さ・高さ・抑揚を数値で指定できる
     * 24000Hz 固定ではなく、出力の標本化周波数を指定できる
 
+同じ API を話すエンジンが 2 つある(`Edition`)。どちらも扱いは同じで、
+違うのは接続先・実行ファイルの場所・公開時のクレジット表記だけ。
+
+    voicevox-nemo  VOICEVOX Nemo ENGINE(人格を持たない声。表示は「VOICEVOX Nemo」)
+    voicevox       VOICEVOX ENGINE(キャラクターの声。話者名の表示が要る)
+
+eラーニング動画の標準のナレーションは、聴き比べたうえで VOICEVOX Nemo の
+「男声3/ノーマル」に決めた。そのため `EDITIONS` は Nemo を先に並べ(この順が
+`tts.ENGINES` の auto が試す順になる)、`NEMO.preferred_styles` の先頭をその声に
+してある。Nemo が入っていない環境では VOICEVOX に下がる。
+
 VOICEVOX ENGINE はローカルの HTTP サーバとして動く。既に起動していれば
 それに接続し、起動していなければ `run.exe` を探して起動する(自分で起動した
 場合だけ、終了時に止める)。
@@ -39,6 +50,7 @@ VOICEVOX は渡された文字列を 1 つの発話として扱い、その書�
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import subprocess
@@ -47,7 +59,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .speech import (
     AudioFormat,
@@ -61,36 +73,117 @@ from .speech import (
 )
 
 ENGINE_NAME = "voicevox"
+NEMO_ENGINE_NAME = "voicevox-nemo"
 DEFAULT_URL = "http://127.0.0.1:50021"
 #: 動画の音声トラックに合わせる。VOICEVOX は任意の周波数で出力できる。
 DEFAULT_SAMPLE_RATE = 48000
 #: 起動を待つ時間(秒)。初回は音声モデルの読み込みで時間がかかる。
 DEFAULT_STARTUP_TIMEOUT = 180.0
 
-#: ナレーション向きの声を上から順に選ぶ。読み上げが目的の落ち着いた声を優先する。
-#: どれも入っていない場合は、最初の会話用スタイルを使う。
-PREFERRED_STYLES = (
-    "No.7/アナウンス",
-    "No.7/読み聞かせ",
-    "玄野武宏/ノーマル",
-    "九州そら/ノーマル",
-    "冥鳴ひまり/ノーマル",
+_ALTERNATIVE_HINT = (
+    "Windows 標準の音声合成を使う場合は --engine sapi または --engine onecore を指定できます。"
 )
 
-_ENGINE_CANDIDATES = (
-    os.path.join(
-        os.environ.get("LOCALAPPDATA", ""), "Programs", "VOICEVOX", "vv-engine", "run.exe"
+
+@dataclass(frozen=True)
+class Edition:
+    """同じ API を話すエンジンの違い(接続先・実行ファイル・クレジット表記)。
+
+    合成の手順はどちらも同じなので、違うところだけをここにまとめ、
+    `VoicevoxEngine` は受け取った `Edition` に従って動く。
+    """
+
+    engine: str  # エンジン名(--engine に書く名前)
+    label: str  # 人に見せる名前
+    default_url: str
+    url_env: str
+    exe_env: str
+    #: `run.exe` を探す場所。`${VAR}` は環境変数、`*` は展開する
+    #: (Nemo は追加エンジンとして入るため、置き場所に UUID が付く)。
+    exe_patterns: Tuple[str, ...]
+    #: 公開時のクレジット表記。`{speaker}` があれば話者名を入れる。
+    credit: str
+    #: 声の指定が無いときに上から順に選ぶスタイル。
+    preferred_styles: Tuple[str, ...] = ()
+    install_hint: str = ""
+
+    @property
+    def port(self) -> int:
+        return urllib.parse.urlparse(self.default_url).port or 50021
+
+    def credit_for(self, speaker: str) -> str:
+        return self.credit.format(speaker=speaker)
+
+
+#: VOICEVOX 本体。キャラクターの声を使うので、公開時は話者名の表示が要る。
+#: 標準のナレーションは Nemo の声にしたので、auto では Nemo が使えないときの控えになる。
+VOICEVOX = Edition(
+    engine=ENGINE_NAME,
+    label="VOICEVOX",
+    default_url=DEFAULT_URL,
+    url_env="VOICEVOX_URL",
+    exe_env="VOICEVOX_ENGINE_PATH",
+    exe_patterns=(
+        "${LOCALAPPDATA}/Programs/VOICEVOX/vv-engine/run.exe",
+        "${ProgramFiles}/VOICEVOX/vv-engine/run.exe",
+        "${LOCALAPPDATA}/Programs/VOICEVOX Engine/run.exe",
+        "${ProgramFiles}/VOICEVOX ENGINE/run.exe",
     ),
-    os.path.join(os.environ.get("ProgramFiles", ""), "VOICEVOX", "vv-engine", "run.exe"),
-    os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "VOICEVOX Engine", "run.exe"),
-    os.path.join(os.environ.get("ProgramFiles", ""), "VOICEVOX ENGINE", "run.exe"),
+    credit="VOICEVOX:{speaker}",
+    #: `--engine voicevox` を声の指定なしで使ったとき(と、Nemo が無くて auto が
+    #: ここへ下りたとき)に、上から順に選ぶ。読み上げが目的の落ち着いた声を優先する。
+    #: 先頭の「No.7/アナウンス」は Gen7 まで標準にしていた声で、VOICEVOX の中では
+    #: 最も読み上げ向き。どれも入っていない場合は、最初の会話用スタイルを使う。
+    preferred_styles=(
+        "No.7/アナウンス",
+        "No.7/読み聞かせ",
+        "玄野武宏/ノーマル",
+        "九州そら/ノーマル",
+        "冥鳴ひまり/ノーマル",
+    ),
+    install_hint=(
+        "VOICEVOX(https://voicevox.hiroshiba.jp/)を入れるか、既に起動している場合は "
+        f"--voicevox-url で場所を指定してください。{_ALTERNATIVE_HINT}"
+    ),
 )
 
-_INSTALL_HINT = (
-    "VOICEVOX(https://voicevox.hiroshiba.jp/)を入れるか、既に起動している場合は "
-    "--voicevox-url で場所を指定してください。Windows 標準の音声合成を使う場合は "
-    "--engine sapi または --engine onecore を指定できます。"
+#: VOICEVOX Nemo。人格を持たない声(女声 1〜6 / 男声 1〜3)だけが入っている。
+#: 標準のナレーションはここの「男声3/ノーマル」。VOICEVOX の追加エンジンとして
+#: 入るため、既定のポートと置き場所が違う。
+NEMO = Edition(
+    engine=NEMO_ENGINE_NAME,
+    label="VOICEVOX Nemo",
+    default_url="http://127.0.0.1:50121",
+    url_env="VOICEVOX_NEMO_URL",
+    exe_env="VOICEVOX_NEMO_ENGINE_PATH",
+    exe_patterns=(
+        "${APPDATA}/voicevox/vvpp-engines/VOICEVOX_Nemo_Engine*/run.exe",
+        "${LOCALAPPDATA}/Programs/VOICEVOX Nemo/vv-engine/run.exe",
+        "${ProgramFiles}/VOICEVOX Nemo/vv-engine/run.exe",
+    ),
+    #: 話者名は表示しなくてよい(どの声も「VOICEVOX Nemo」と書けば足りる)。
+    credit="VOICEVOX Nemo",
+    #: 先頭の「男声3/ノーマル」が標準のナレーション音声。128Hz / 抑揚 2.90 半音 /
+    #: 8.68 モーラ秒と、聴き比べた候補の中で最も低く、耳に刺さりにくい。
+    #: 声に人格が無いので、聞き手の注意が話し手ではなく内容へ向き、公開時の表示も
+    #: 「VOICEVOX Nemo」だけで済む。auto はこのエンジンから試すので、指定を
+    #: 何もしなければこの声になる。
+    preferred_styles=("男声3/ノーマル", "女声2/ノーマル"),
+    install_hint=(
+        "VOICEVOX の「エンジン」設定から VOICEVOX Nemo "
+        "(https://voicevox.hiroshiba.jp/nemo/)を追加するか、既に起動している場合は "
+        f"環境変数 VOICEVOX_NEMO_URL で場所を指定してください。{_ALTERNATIVE_HINT}"
+    ),
 )
+
+#: エンジン名から `Edition` を引く。並び順は auto が試す順(`tts.ENGINES`)でもあり、
+#: 先頭が標準のナレーションを出すエンジンになる。
+EDITIONS: Dict[str, Edition] = {edition.engine: edition for edition in (NEMO, VOICEVOX)}
+
+
+def edition_for(name: str) -> Optional[Edition]:
+    """エンジン名から `Edition` を引く(VOICEVOX 系でなければ None)。"""
+    return EDITIONS.get(name)
 
 
 @dataclass(frozen=True)
@@ -102,6 +195,7 @@ class Style:
     id: int
     kind: str = "talk"
     uuid: str = ""
+    edition: Edition = VOICEVOX
 
     @property
     def name(self) -> str:
@@ -110,13 +204,13 @@ class Style:
     @property
     def credit(self) -> str:
         """公開時に表示する必要のあるクレジット表記。"""
-        return f"VOICEVOX:{self.speaker}"
+        return self.edition.credit_for(self.speaker)
 
     def to_voice(self) -> Voice:
         return Voice(
             name=self.name,
             language="ja-JP",
-            engine=ENGINE_NAME,
+            engine=self.edition.engine,
             note=f"id={self.id}",
         )
 
@@ -126,18 +220,26 @@ class Style:
 # ---------------------------------------------------------------------------
 
 
-def candidate_paths(explicit: Optional[str] = None) -> List[str]:
+def candidate_paths(explicit: Optional[str] = None, edition: Edition = VOICEVOX) -> List[str]:
+    """`run.exe` を探す場所を上から順に返す(見つからなかったときの表示にも使う)。"""
     if explicit:
         return [explicit]
-    paths = [os.environ.get("VOICEVOX_ENGINE_PATH", ""), *_ENGINE_CANDIDATES]
-    return [p for p in paths if p and os.path.dirname(p)]
+    paths = [os.environ.get(edition.exe_env, ""), *edition.exe_patterns]
+    expanded = [os.path.expandvars(p) for p in paths if p]
+    # 環境変数が無い場合、expandvars は `${VAR}` をそのまま残す。その場所は無い。
+    return [p for p in expanded if "${" not in p and os.path.dirname(p)]
 
 
-def find_engine_exe(explicit: Optional[str] = None) -> Optional[str]:
-    """VOICEVOX ENGINE の `run.exe` を探す。"""
-    for candidate in candidate_paths(explicit):
-        if os.path.isfile(candidate):
-            return os.path.abspath(candidate)
+def find_engine_exe(explicit: Optional[str] = None, edition: Edition = VOICEVOX) -> Optional[str]:
+    """VOICEVOX ENGINE の `run.exe` を探す。
+
+    `*` を含む場所だけ展開する(指定されたパスは、そのまま 1 つの場所として扱う)。
+    """
+    for candidate in candidate_paths(explicit, edition):
+        found = sorted(glob.glob(candidate)) if "*" in candidate else [candidate]
+        for path in found:
+            if os.path.isfile(path):
+                return os.path.abspath(path)
     return None
 
 
@@ -194,8 +296,6 @@ def _request(url: str, data: Optional[bytes] = None, timeout: float = 60.0) -> b
 class VoicevoxEngine:
     """VOICEVOX ENGINE を音声合成エンジンとして使う。"""
 
-    name = ENGINE_NAME
-
     def __init__(
         self,
         url: Optional[str] = None,
@@ -203,8 +303,13 @@ class VoicevoxEngine:
         autostart: bool = True,
         startup_timeout: float = DEFAULT_STARTUP_TIMEOUT,
         on_startup: Optional[Callable[[str], None]] = None,
+        edition: Edition = VOICEVOX,
     ) -> None:
-        self.base_url = (url or os.environ.get("VOICEVOX_URL") or DEFAULT_URL).rstrip("/")
+        self.edition = edition
+        self.name = edition.engine
+        self.base_url = (
+            url or os.environ.get(edition.url_env) or edition.default_url
+        ).rstrip("/")
         self.exe = exe
         self.autostart = autostart
         self.startup_timeout = startup_timeout
@@ -237,23 +342,25 @@ class VoicevoxEngine:
             return raw.decode("utf-8", errors="replace").strip()
 
     def _start(self) -> str:
+        label = self.edition.label
         if not self.autostart:
             raise SpeechNotAvailableError(
-                f"VOICEVOX ENGINE に接続できません: {self.base_url}\n"
-                "VOICEVOX を起動してから実行するか、--voicevox-url で場所を指定してください。"
+                f"{label} ENGINE に接続できません: {self.base_url}\n"
+                f"{label} を起動してから実行するか、"
+                f"環境変数 {self.edition.url_env} で場所を指定してください。"
             )
-        exe = find_engine_exe(self.exe)
+        exe = find_engine_exe(self.exe, self.edition)
         if not exe:
-            tried = "\n".join(f"  {p}" for p in candidate_paths(self.exe))
+            tried = "\n".join(f"  {p}" for p in candidate_paths(self.exe, self.edition))
             raise SpeechNotAvailableError(
-                f"VOICEVOX ENGINE が見つかりません。{_INSTALL_HINT}\n"
+                f"{label} ENGINE が見つかりません。{self.edition.install_hint}\n"
                 f"接続を試した場所: {self.base_url}\n探した場所:\n{tried}"
             )
 
-        host, port = _split_url(self.base_url)
+        host, port = _split_url(self.base_url, self.edition.port)
         command = [exe, "--host", host, "--port", str(port)]
         if self.on_startup:
-            self.on_startup(f"VOICEVOX ENGINE を起動しています: {exe}")
+            self.on_startup(f"{label} ENGINE を起動しています: {exe}")
         try:
             self._process = subprocess.Popen(
                 command,
@@ -263,14 +370,14 @@ class VoicevoxEngine:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except OSError as exc:
-            raise SynthesisError(f"VOICEVOX ENGINE を起動できませんでした: {exc}", command) from exc
+            raise SynthesisError(f"{label} ENGINE を起動できませんでした: {exc}", command) from exc
 
         deadline = time.monotonic() + self.startup_timeout
         while time.monotonic() < deadline:
             if self._process.poll() is not None:
                 stderr = _read_stderr(self._process)
                 raise SynthesisError(
-                    "VOICEVOX ENGINE がすぐに終了しました。",
+                    f"{label} ENGINE がすぐに終了しました。",
                     command,
                     returncode=self._process.returncode,
                     stderr=stderr,
@@ -282,8 +389,8 @@ class VoicevoxEngine:
 
         self.close()
         raise SynthesisError(
-            f"VOICEVOX ENGINE が {self.startup_timeout:g} 秒以内に起動しませんでした。"
-            "先に VOICEVOX を起動しておくか、--voicevox-startup-timeout を延ばしてください。",
+            f"{label} ENGINE が {self.startup_timeout:g} 秒以内に起動しませんでした。"
+            f"先に {label} を起動しておくか、--voicevox-startup-timeout を延ばしてください。",
             command,
         )
 
@@ -336,6 +443,7 @@ class VoicevoxEngine:
                 id=int(style.get("id")),
                 kind=str(style.get("type") or "talk"),
                 uuid=str(speaker.get("speaker_uuid", "")),
+                edition=self.edition,
             )
             for speaker in data
             if isinstance(speaker, dict)
@@ -343,7 +451,7 @@ class VoicevoxEngine:
             if isinstance(style, dict) and style.get("id") is not None
         ]
         if not styles:
-            raise SynthesisError("VOICEVOX に使える音声がありません。", ["GET", url])
+            raise SynthesisError(f"{self.edition.label} に使える音声がありません。", ["GET", url])
         self._styles = styles
         return styles
 
@@ -376,7 +484,7 @@ class VoicevoxEngine:
 
         talk = [s for s in styles if s.kind == "talk"] or styles
         by_name = {s.name: s for s in talk}
-        for preferred in PREFERRED_STYLES:
+        for preferred in self.edition.preferred_styles:
             if preferred in by_name:
                 return by_name[preferred]
         return talk[0]
@@ -389,6 +497,16 @@ class VoicevoxEngine:
             if style.name == voice_name:
                 return style.credit
         return ""
+
+    def read(self, text: str, style: Style, timeout: float = 60.0) -> List[dict]:
+        """文字列の読み(アクセント句)を、長さと音程まで決めて返す。音は作らない。
+
+        合成に渡すものと同じ手順(読みを作ってから音程を決め直す)で作るので、
+        ここで測った高さや速さは、実際に聞こえる音声のものと一致する。
+        音を作らずに済むぶん 1 話者あたり 1 秒もかからず、全話者を測れる。
+        """
+        self.ensure_ready()
+        return self._mora_data(self._accent_phrases(text, style.id, timeout), style.id, timeout)
 
     # -- 合成 -----------------------------------------------------------
     def synthesize(
@@ -574,9 +692,9 @@ def _pause_mora(seconds: float) -> dict:
     }
 
 
-def _split_url(url: str) -> tuple[str, int]:
+def _split_url(url: str, default_port: int = 50021) -> tuple[str, int]:
     parsed = urllib.parse.urlparse(url)
-    return parsed.hostname or "127.0.0.1", parsed.port or 50021
+    return parsed.hostname or "127.0.0.1", parsed.port or default_port
 
 
 def _read_stderr(process: subprocess.Popen) -> str:
@@ -606,5 +724,5 @@ def _curl_command(base_url: str, style_id: int) -> List[str]:
     ]
 
 
-def is_installed(exe: Optional[str] = None) -> bool:
-    return find_engine_exe(exe) is not None
+def is_installed(exe: Optional[str] = None, edition: Edition = VOICEVOX) -> bool:
+    return find_engine_exe(exe, edition) is not None

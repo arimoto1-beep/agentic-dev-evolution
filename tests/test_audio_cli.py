@@ -15,7 +15,7 @@ def without_voicevox(monkeypatch):
     --check は使える方式をすべて調べるため、これが無いと実行環境しだいで
     結果が変わる。VOICEVOX を含む --check は test_check_reports_voicevox で見る。
     """
-    monkeypatch.setattr(voicevox, "find_engine_exe", lambda explicit=None: None)
+    monkeypatch.setattr(voicevox, "find_engine_exe", lambda explicit=None, edition=None: None)
     monkeypatch.setattr(voicevox.VoicevoxEngine, "_probe", lambda self, timeout=3.0: None)
 
 

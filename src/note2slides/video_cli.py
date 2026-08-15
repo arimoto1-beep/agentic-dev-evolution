@@ -106,7 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--engine",
         choices=(tts_mod.ENGINE_AUTO,) + tts_mod.ENGINES,
         default=tts_mod.ENGINE_AUTO,
-        help="音声合成の方式(既定: auto = voicevox を優先)",
+        help=f"音声合成の方式(既定: auto = {tts_mod.ENGINES[0]} を優先)",
     )
     voice_group.add_argument("--voice", help="使う音声(voicevox は「話者/スタイル」)")
     voice_group.add_argument(
@@ -469,7 +469,6 @@ def check_tools(args) -> int:
             args.engine,
             args.powershell,
             "ja",
-            args.voicevox_exe,
             audio_cli.voicevox_options_from(args),
         )
         != audio_cli.EXIT_OK

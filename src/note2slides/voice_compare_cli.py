@@ -14,6 +14,7 @@ from typing import List, Optional
 
 from . import __version__
 from . import tts as tts_mod
+from . import voice_survey
 from . import voicevox as voicevox_mod
 from .audio import DEFAULT_LOUDNESS_LUFS, AudioExportError, AudioOptions
 from .audio_cli import check_tools, voicevox_options_from
@@ -57,6 +58,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     group = parser.add_argument_group("候補")
+    group.add_argument(
+        "--survey",
+        action="store_true",
+        help="使える声をすべて測って一覧にする(音声は作らない。候補を絞るための材料)",
+    )
     group.add_argument(
         "--candidates", metavar="PATH", help="候補の一覧(JSON。既定は組み込みの候補)"
     )
@@ -118,9 +124,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     voicevox_options = voicevox_options_from(args)
 
     if args.check:
-        return check_tools(
-            tts_mod.ENGINE_AUTO, args.powershell, "ja", args.voicevox_exe, voicevox_options
-        )
+        return check_tools(tts_mod.ENGINE_AUTO, args.powershell, "ja", voicevox_options)
 
     try:
         candidates = _candidates(args)
@@ -131,6 +135,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.list_candidates:
         _list_candidates(candidates)
         return EXIT_OK
+
+    if args.survey:
+        return _survey(args, candidates)
 
     if not args.input:
         print(
@@ -156,7 +163,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     # (途中で止まっているのか、時間がかかっているだけなのかを見分けられる)。
     def on_candidate(position: int, total: int, candidate: Candidate) -> None:
         if not args.quiet:
-            print(f"[{position}/{total}] {candidate.id}（{candidate.voice}）", flush=True)
+            where = f" / {candidate.engine}" if candidate.engine else ""
+            print(f"[{position}/{total}] {candidate.id}（{candidate.voice}{where}）", flush=True)
 
     def on_progress(index: int) -> None:
         if not args.quiet:
@@ -207,10 +215,41 @@ def _candidates(args) -> List[Candidate]:
     return [known[name] for name in wanted]
 
 
+def _survey(args, candidates: List[Candidate]) -> int:
+    """使える声をすべて測って一覧にする(合成はしない)。
+
+    候補に入れた声には印を付ける。一覧と候補が別々の書き物になっていると、
+    なぜその声を選んだのかを後から突き合わせられない。
+    """
+    results = voice_survey.survey_editions(
+        voicevox_options=voicevox_options_from(args),
+        timeout=args.timeout,
+        on_engine=None if args.quiet else lambda edition, note: print(f"{edition.engine}: {note}"),
+    )
+    if not results:
+        print(
+            "測れる音声がありません。VOICEVOX が起動しているか確認してください"
+            "(--check で状態を表示します)。",
+            file=sys.stderr,
+        )
+        return EXIT_NO_ENGINE
+
+    index_path, report_path = voice_survey.write_survey(
+        args.outdir, results, marked=[c.voice for c in candidates]
+    )
+    if not args.quiet:
+        ok = [r for r in results if r.ok]
+        print(f"{len(ok)} 種類の声を測りました: {args.outdir}")
+        print(f"  一覧: {os.path.basename(report_path)} / {os.path.basename(index_path)}")
+        print("聴き比べる候補を絞るための材料です。音声は作っていません。")
+    return EXIT_OK
+
+
 def _list_candidates(candidates: List[Candidate]) -> None:
     base = AudioOptions()
     for candidate in candidates:
-        print(f"{candidate.id}: {candidate.voice}")
+        where = f"({candidate.engine})" if candidate.engine else ""
+        print(f"{candidate.id}: {candidate.voice}{where}")
         if candidate.role:
             print(f"  位置づけ: {candidate.role}")
         print(f"  設定: {candidate.describe_settings(base)}")

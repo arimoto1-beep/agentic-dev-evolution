@@ -1,14 +1,18 @@
 """音声合成エンジンを選び、Windows 標準の音声合成を呼び出す。
 
-利用できるエンジンは 3 つ。auto はこの順で試す。
+利用できるエンジンは 4 つ。auto はこの順で試す。
 
-    voicevox  VOICEVOX ENGINE(ニューラル音声合成。実装は voicevox.py)
-    onecore   Windows.Media.SpeechSynthesis(Ayumi / Haruka / Ichiro など)
-    sapi      System.Speech(Haruka Desktop など。出力形式を指定できる)
+    voicevox-nemo  VOICEVOX Nemo ENGINE(標準のナレーション。人格を持たない声)
+    voicevox       VOICEVOX ENGINE(ニューラル音声合成。実装は voicevox.py)
+    onecore        Windows.Media.SpeechSynthesis(Ayumi / Haruka / Ichiro など)
+    sapi           System.Speech(Haruka Desktop など。出力形式を指定できる)
 
-voicevox を先に試すのは、eラーニング動画のナレーションとして数分以上聞き続けられる
-のが現状これだけのため。Windows 標準の 2 つは、VOICEVOX が入っていない環境でも
-とにかく音声を出せるようにするための控えとして残している。
+VOICEVOX 系を先に試すのは、eラーニング動画のナレーションとして数分以上聞き続け
+られるのが現状これだけのため。その中で VOICEVOX Nemo を先にするのは、標準の
+ナレーションを Nemo の「男声3/ノーマル」に決めたため(声に人格が無く、公開時の
+表示も「VOICEVOX Nemo」だけで済む)。Nemo が入っていない環境では VOICEVOX に
+下がり、Windows 標準の 2 つは、どちらも入っていない環境でとにかく音声を出せる
+ようにするための控えとして残している。
 
 Windows 標準の音声合成の呼び出しは同梱の `speech.ps1` に任せ、Python 側は
 「何を読み上げて、どこに WAV を書くか」だけを渡す。1 回の呼び出しで全件を
@@ -54,13 +58,17 @@ __all__ = [
     "SynthesisReport",
     "Voice",
     "VoicevoxEngine",
+    "default_narration",
     "select_engine",
 ]
 
 #: Windows に最初から入っている音声合成。
 WINDOWS_ENGINES = ("onecore", "sapi")
+#: VOICEVOX ENGINE と、同じ API を話す派生エンジン(順は `voicevox.EDITIONS`)。
+#: 先頭は標準のナレーションを出すエンジン。
+VOICEVOX_ENGINES = tuple(voicevox_mod.EDITIONS)
 #: 利用できるエンジン。auto はこの順で試す。
-ENGINES = (voicevox_mod.ENGINE_NAME,) + WINDOWS_ENGINES
+ENGINES = VOICEVOX_ENGINES + WINDOWS_ENGINES
 ENGINE_AUTO = "auto"
 
 #: OneCore は出力形式を指定できず、この形式で返ってくる。
@@ -446,9 +454,24 @@ def create_engine(
     voicevox_options: Optional[dict] = None,
 ):
     """名前を指定してエンジンを 1 つ作る(接続や音声の確認はしない)。"""
-    if name == voicevox_mod.ENGINE_NAME:
-        return VoicevoxEngine(**(voicevox_options or {}))
+    edition = voicevox_mod.edition_for(name)
+    if edition is not None:
+        return VoicevoxEngine(edition=edition, **voicevox_engine_options(edition, voicevox_options))
     return SpeechEngine(name, powershell)
+
+
+def voicevox_engine_options(edition, options: Optional[dict]) -> dict:
+    """`--voicevox-url` などの指定のうち、そのエンジンに向いたものだけを渡す。
+
+    接続先と実行ファイルの場所はエンジンごとに違うので、既定のエンジン向けの
+    指定を派生エンジンに渡すと、別のエンジンにつなぎに行ってしまう。
+    指定が無ければ、それぞれの環境変数と既定のポートが使われる。
+    """
+    options = dict(options or {})
+    if edition is not voicevox_mod.VOICEVOX:
+        options.pop("url", None)
+        options.pop("exe", None)
+    return options
 
 
 def select_engine(
@@ -460,7 +483,8 @@ def select_engine(
     """使うエンジンを決める。
 
     auto なら ENGINES の順に試し、実際にその言語の音声を選べたものを返す。
-    VOICEVOX を先に試すのは、ナレーションとして聞ける品質になるのが現状
+    先頭は標準のナレーション(VOICEVOX Nemo の「男声3/ノーマル」)を出すエンジンで、
+    VOICEVOX 系を先に試すのは、ナレーションとして聞ける品質になるのが現状
     これだけのため。見つからない場合は、どのエンジンがなぜ使えなかったかを
     すべて並べて返す(1 つだけ挙げても原因の切り分けにならない)。
     """
@@ -484,11 +508,26 @@ def select_engine(
     )
 
 
+def default_narration() -> tuple:
+    """標準のナレーション(エンジン名, 話者/スタイル)。
+
+    何も指定せずに合成したときに使われる声。auto が最初に試すエンジンと、
+    そのエンジンが声の指定なしで選ぶ声から決まるので、ここで別に持たない
+    (持つと、実際に使われる声と食い違ったまま気付けなくなる)。
+    """
+    name = ENGINES[0]
+    edition = voicevox_mod.edition_for(name)
+    styles = edition.preferred_styles if edition else ()
+    return name, (styles[0] if styles else "")
+
+
 def available_engines(powershell: Optional[str] = None) -> List[str]:
     """それぞれのエンジンが使えそうかを、起動せずに分かる範囲で判定する。"""
-    names = []
-    if voicevox_mod.is_installed():
-        names.append(voicevox_mod.ENGINE_NAME)
+    names = [
+        edition.engine
+        for edition in voicevox_mod.EDITIONS.values()
+        if voicevox_mod.is_installed(edition=edition)
+    ]
     if find_powershell(powershell):
         names.extend(WINDOWS_ENGINES)
     return names

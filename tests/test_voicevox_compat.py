@@ -18,7 +18,8 @@ from note2slides import convert_file, export_narration
 from note2slides.audio import AudioOptions
 from note2slides.reading import ReadingStyle
 from note2slides.speech import SpeechError, SpeechJob, SpeechPiece
-from note2slides.voicevox import VoicevoxEngine, is_installed
+from note2slides.voice_survey import DEFAULT_TEXT, measure_styles
+from note2slides.voicevox import NEMO, VoicevoxEngine, is_installed
 from note2slides.waveform import loudness_lufs, peak_dbfs, read_wav
 
 pytestmark = pytest.mark.slow
@@ -37,16 +38,30 @@ title: ナレーション音声の確認
 """
 
 
-@pytest.fixture(scope="module")
-def engine():
-    if not is_installed():
-        pytest.skip("VOICEVOX が入っていません")
-    engine = VoicevoxEngine()
+def start(edition=None):
+    kwargs = {"edition": edition} if edition else {}
+    label = edition.label if edition else "VOICEVOX"
+    if not is_installed(**({"edition": edition} if edition else {})):
+        pytest.skip(f"{label} が入っていません")
+    engine = VoicevoxEngine(**kwargs)
     try:
         engine.ensure_ready()
     except SpeechError as exc:
         engine.close()
-        pytest.skip(f"VOICEVOX ENGINE を使えません: {exc}")
+        pytest.skip(f"{label} ENGINE を使えません: {exc}")
+    return engine
+
+
+@pytest.fixture(scope="module")
+def engine():
+    engine = start()
+    yield engine
+    engine.close()
+
+
+@pytest.fixture(scope="module")
+def nemo():
+    engine = start(NEMO)
     yield engine
     engine.close()
 
@@ -180,3 +195,52 @@ def test_sentences_get_a_pause_between_them(tmp_path, engine):
 
     assert tight.clips[0].duration > 1.0  # 実際に声が入っている
     assert spaced.clips[0].duration == pytest.approx(tight.clips[0].duration + 0.5, abs=0.05)
+
+
+def test_standard_narration_voice_exists_in_the_engine(nemo):
+    """標準のナレーション音声が、実機の音声一覧にあることを確かめる。
+
+    名前を書き間違えても `pick_style` は黙って一覧の先頭に下がるため、
+    実際のエンジンで名前が引けるかどうかはここでしか分からない。
+    """
+    from note2slides import tts
+
+    engine_name, voice = tts.default_narration()
+
+    assert engine_name == nemo.name
+    assert voice in [style.name for style in nemo.list_styles()]
+    assert nemo.pick_style().name == voice  # 指定なしでこの声になる
+
+
+def test_nemo_speaks_with_its_own_voice_and_credit(tmp_path, nemo):
+    """VOICEVOX Nemo は別のエンジン。声も、公開時に必要な表示も違う。"""
+    script = tmp_path / "script.json"
+    script.write_text(
+        json.dumps({"segments": [{"index": 1, "text": "別のエンジンの確認です。"}]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    result = export_narration(
+        str(script),
+        str(tmp_path / "audio"),
+        AudioOptions(engine="voicevox-nemo", voice="女声1/ノーマル"),
+        engine=nemo,
+    )
+
+    assert result.engine == "voicevox-nemo"
+    assert result.voice == "女声1/ノーマル"
+    # Nemo の声には人格が無く、話者名を出さずに「VOICEVOX Nemo」と書けばよい。
+    assert result.credit == "VOICEVOX Nemo"
+    assert result.clips[0].duration > 0.5
+
+
+def test_measured_pitch_is_in_the_range_of_a_human_voice(engine):
+    """音程は自然対数の Hz で返ってくる。単位を取り違えると桁が変わる。"""
+    styles = [s for s in engine.list_styles() if s.name == "No.7/アナウンス"]
+    measured = measure_styles(engine, DEFAULT_TEXT, styles or engine.list_styles()[:1])[0]
+
+    assert measured.ok
+    assert 80.0 < measured.pitch_hz < 500.0  # 人の声の高さ
+    assert 0.0 < measured.pitch_spread < 12.0  # 1 オクターブも振れることはない
+    assert 3.0 < measured.rate < 15.0  # モーラ/秒
+    assert measured.voiced <= measured.moras

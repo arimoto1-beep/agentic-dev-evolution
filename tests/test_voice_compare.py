@@ -10,6 +10,7 @@ import os
 
 import pytest
 
+from note2slides import voice_compare
 from note2slides.audio import AudioOptions
 from note2slides.reading import ReadingStyle
 from note2slides.voice_compare import (
@@ -99,12 +100,26 @@ def test_candidate_describes_only_changed_settings():
 
 
 def test_builtin_candidates_include_current_standard():
-    """現行の標準を比較の基準として必ず含める(無いと良し悪しを判断できない)。"""
+    """標準の声を比較の基準として必ず含める(無いと良し悪しを判断できない)。"""
+    from note2slides import tts
+
     ids = [c.id for c in CANDIDATES]
     assert len(ids) == len(set(ids))
+    engine, voice = tts.default_narration()
+    assert any(
+        c.voice == voice and c.engine == engine and c.speed == 1.0 for c in CANDIDATES
+    )
+    # Gen7 までの標準も、次に見直すときに比べられるよう残す。
     assert any(c.voice == "No.7/アナウンス" and c.speed == 1.0 for c in CANDIDATES)
     # 選んだ理由は成果物に書き出すので、空のものを混ぜない
     assert all(len(c.reason) > 20 for c in CANDIDATES)
+
+
+def test_builtin_candidates_name_a_known_engine():
+    """エンジン名を書き間違えると、合成を始めてから止まる。"""
+    from note2slides import tts
+
+    assert all(not c.engine or c.engine in tts.ENGINES for c in CANDIDATES)
 
 
 def test_duplicate_id_is_rejected(tmp_path):
@@ -229,6 +244,76 @@ def test_preview_can_be_skipped(tmp_path):
     assert not os.path.exists(os.path.join(result.outdir, PREVIEW_NAME))
 
 
+def test_candidate_can_use_another_engine(tmp_path, monkeypatch):
+    """VOICEVOX と VOICEVOX Nemo は別のエンジンで動く。同じ比較の中で混ぜられる。"""
+    others = {}
+
+    def fake_select(name, powershell=None, language="ja", voicevox_options=None):
+        others[name] = others.get(name) or FakeEngine(name=name)
+        return others[name]
+
+    monkeypatch.setattr(voice_compare.tts_mod, "select_engine", fake_select)
+    base = FakeEngine()
+    candidates = [
+        Candidate(id="alpha", voice="話者A/ノーマル", reason="基準"),
+        Candidate(id="beta", voice="女声1/ノーマル", reason="別のエンジン", engine="voicevox-nemo"),
+        Candidate(id="gamma", voice="女声2/ノーマル", reason="同じエンジン", engine="voicevox-nemo"),
+    ]
+
+    result = run(tmp_path, candidates, engine=base)
+
+    assert [r.candidate.id for r in result.succeeded] == ["alpha", "beta", "gamma"]
+    # 基準のエンジンは呼び出し側のもの、指定のある候補だけが別のエンジンを使う。
+    assert [call["voice"] for call in base.calls] == ["話者A/ノーマル"]
+    assert [call["voice"] for call in others["voicevox-nemo"].calls] == [
+        "女声1/ノーマル",
+        "女声2/ノーマル",
+    ]
+    # 起動と音声モデルの読み込みが候補ごとに起きないよう、エンジンは 1 つだけ作る。
+    assert list(others) == ["voicevox-nemo"]
+    assert result.engine == "fake / voicevox-nemo"
+
+
+def test_candidate_engine_is_closed_but_the_given_one_is_kept(tmp_path, monkeypatch):
+    """自分で作ったエンジンだけを閉じる(呼び出し側のものを閉じると次が動かない)。"""
+    created = FakeEngine(name="voicevox-nemo")
+    monkeypatch.setattr(
+        voice_compare.tts_mod,
+        "select_engine",
+        lambda name, powershell=None, language="ja", voicevox_options=None: created,
+    )
+    base = FakeEngine()
+
+    run(
+        tmp_path,
+        [
+            Candidate(id="alpha", voice="A", reason=""),
+            Candidate(id="beta", voice="B", reason="", engine="voicevox-nemo"),
+        ],
+        engine=base,
+    )
+
+    assert created.closed and not base.closed
+
+
+def test_index_and_report_record_the_engine(tmp_path, monkeypatch):
+    """どのエンジンで作った音声かで、公開時の表示も変わる。"""
+    monkeypatch.setattr(
+        voice_compare.tts_mod,
+        "select_engine",
+        lambda name, powershell=None, language="ja", voicevox_options=None: FakeEngine(name=name),
+    )
+    result = run(
+        tmp_path,
+        [Candidate(id="beta", voice="女声1/ノーマル", reason="別のエンジン", engine="voicevox-nemo")],
+        engine=FakeEngine(),
+    )
+
+    index = json.load(open(result.index_path, encoding="utf-8"))
+    assert index["candidates"][0]["engine"] == "voicevox-nemo"
+    assert "voicevox-nemo" in open(result.report_path, encoding="utf-8").read()
+
+
 def test_markdown_input_is_converted_once(tmp_path):
     article = tmp_path / "article.md"
     article.write_text("# 見出し\n\n本文です。\n", encoding="utf-8")
@@ -317,8 +402,22 @@ def test_report_keeps_the_reason_for_each_candidate(tmp_path):
     assert "速さ 0.95" in report
     assert f"beta/{CONTINUOUS_NAME}" in report
     assert PREVIEW_NAME in report
-    # 標準を勝手に変えていないことを明記する
-    assert "標準の音声はまだ変更していません" in report
+    # いま何が標準かと、このコマンドがそれを変えないことを明記する
+    from note2slides import tts
+
+    engine, voice = tts.default_narration()
+    assert f"現在の標準は `{engine}` の「{voice}」" in report
+    assert "このコマンドは標準を変更しない" in report
+
+
+def test_report_shows_how_much_each_candidate_was_limited(tmp_path):
+    """処理は同じでも、ピークを抑えた量は声によって違う。聞く前に分かるようにする。"""
+    result = run(tmp_path)
+
+    report = open(result.report_path, encoding="utf-8").read()
+    assert "ピークを抑えた量" in report
+    for item in result.succeeded:
+        assert f"| {item.candidate.id} | {item.narration.loudness.measured_lufs:.1f} LUFS" in report
 
 
 def test_index_records_settings_and_files(tmp_path):

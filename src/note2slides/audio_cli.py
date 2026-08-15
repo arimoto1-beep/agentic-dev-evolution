@@ -56,10 +56,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--engine",
         choices=(tts_mod.ENGINE_AUTO,) + tts_mod.ENGINES,
         default=tts_mod.ENGINE_AUTO,
-        help="音声合成の方式(既定: auto = voicevox を優先)",
+        help=f"音声合成の方式(既定: auto = {tts_mod.ENGINES[0]} を優先)",
     )
     voice_group.add_argument(
-        "--voice", help="使う音声の名前(voicevox は「話者/スタイル」の形で指定する)"
+        "--voice",
+        help=(
+            "使う音声の名前(voicevox は「話者/スタイル」の形で指定する。"
+            "既定は標準のナレーション音声)"
+        ),
     )
     voice_group.add_argument("--language", default="ja", help="音声を選ぶときの言語(既定: ja)")
     voice_group.add_argument(
@@ -193,7 +197,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             args.engine,
             args.powershell,
             args.language,
-            args.voicevox_exe,
             voicevox_options,
             args.list_voices,
         )
@@ -340,7 +343,6 @@ def check_tools(
     engine: str,
     powershell: Optional[str],
     language: str,
-    voicevox_exe: Optional[str],
     voicevox_options: dict,
     list_voices: bool = False,
 ) -> int:
@@ -351,8 +353,9 @@ def check_tools(
     targets = tts_mod.ENGINES if engine == tts_mod.ENGINE_AUTO else (engine,)
     usable = 0
     for name in targets:
-        if name == voicevox_mod.ENGINE_NAME:
-            usable += _check_voicevox(voicevox_exe, voicevox_options, list_voices)
+        edition = voicevox_mod.edition_for(name)
+        if edition is not None:
+            usable += _check_voicevox(edition, voicevox_options, list_voices)
         else:
             usable += _check_windows(name, powershell, language)
     if not usable:
@@ -365,24 +368,23 @@ def check_tools(
     return EXIT_OK
 
 
-def _check_voicevox(
-    voicevox_exe: Optional[str], voicevox_options: dict, list_voices: bool
-) -> int:
-    exe = voicevox_mod.find_engine_exe(voicevox_exe)
-    url = voicevox_options["url"] or os.environ.get("VOICEVOX_URL") or voicevox_mod.DEFAULT_URL
-    engine = voicevox_mod.VoicevoxEngine(**voicevox_options)
+def _check_voicevox(edition, voicevox_options: dict, list_voices: bool) -> int:
+    options = tts_mod.voicevox_engine_options(edition, voicevox_options)
+    exe = voicevox_mod.find_engine_exe(options.get("exe") or None, edition)
+    url = options.get("url") or os.environ.get(edition.url_env) or edition.default_url
+    engine = voicevox_mod.VoicevoxEngine(edition=edition, **options)
     try:
         version = engine.ensure_ready()
         styles = engine.list_styles()
     except tts_mod.SpeechError as exc:
-        print(f"voicevox: 使えません({url})", file=sys.stderr)
+        print(f"{edition.engine}: 使えません({url})", file=sys.stderr)
         print("\n".join("  " + line for line in str(exc).splitlines()), file=sys.stderr)
         return 0
     finally:
         engine.close()
 
     talk = [s for s in styles if s.kind == "talk"]
-    print(f"voicevox: 使えます(ENGINE {version} / {url} / 音声 {len(talk)} 種類)")
+    print(f"{edition.engine}: 使えます(ENGINE {version} / {url} / 音声 {len(talk)} 種類)")
     if exe:
         print(f"  実行ファイル: {exe}")
     default = engine.pick_style()

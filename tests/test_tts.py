@@ -29,7 +29,7 @@ def without_voicevox(monkeypatch):
     auto の選択順に VOICEVOX が入るため、これが無いと結果が実行環境によって
     変わってしまう。VOICEVOX 自体の確認は tests/test_voicevox.py で行う。
     """
-    monkeypatch.setattr(voicevox, "find_engine_exe", lambda explicit=None: None)
+    monkeypatch.setattr(voicevox, "find_engine_exe", lambda explicit=None, edition=None: None)
     monkeypatch.setattr(voicevox.VoicevoxEngine, "_probe", lambda self, timeout=3.0: None)
 
 
@@ -192,6 +192,64 @@ def test_auto_reports_every_engine_it_tried(fake_powershell, monkeypatch):
     message = str(excinfo.value)
     # どれか 1 つだけを挙げても切り分けにならないので、試した全部を並べる。
     assert "[voicevox]" in message and "[onecore]" in message and "[sapi]" in message
+    assert "[voicevox-nemo]" in message
+
+
+def test_nemo_is_created_as_its_own_engine():
+    engine = tts.create_engine("voicevox-nemo")
+
+    assert engine.edition is voicevox.NEMO
+    assert engine.name == "voicevox-nemo"
+
+
+def test_standard_narration_is_what_auto_reaches_first():
+    """標準のナレーションは VOICEVOX Nemo の「男声3/ノーマル」。
+
+    聴き比べて決めた声なので、選択順や既定の声を触ったときに気付けるよう固定する。
+    """
+    assert tts.ENGINES[0] == "voicevox-nemo"
+    assert tts.default_narration() == ("voicevox-nemo", "男声3/ノーマル")
+
+
+def _voicevox_available(monkeypatch, editions):
+    """指定した Edition だけ、起動していて声も選べる状態にする。
+
+    起動していないほうは `find_engine_exe` も見つからない(autouse の
+    without_voicevox)ので、auto はそのエンジンを飛ばして次を試す。
+    """
+    monkeypatch.setattr(
+        voicevox.VoicevoxEngine,
+        "_probe",
+        lambda self, timeout=3.0: "0.25.2" if self.edition in editions else None,
+    )
+
+    def pick_voice(self, name=None, language="ja"):
+        self.ensure_ready()
+        return Voice("声", "ja-JP", engine=self.name)
+
+    monkeypatch.setattr(voicevox.VoicevoxEngine, "pick_voice", pick_voice)
+
+
+def test_auto_starts_from_the_standard_narration_engine(monkeypatch):
+    """両方使える環境では、標準のナレーションを出す Nemo が選ばれる。"""
+    _voicevox_available(monkeypatch, (voicevox.NEMO, voicevox.VOICEVOX))
+
+    assert tts.select_engine("auto").name == "voicevox-nemo"
+
+
+def test_auto_falls_back_to_voicevox_without_nemo(monkeypatch):
+    """Nemo が入っていない環境でも、VOICEVOX があればナレーションは作れる。"""
+    _voicevox_available(monkeypatch, (voicevox.VOICEVOX,))
+
+    assert tts.select_engine("auto").name == "voicevox"
+
+
+def test_voicevox_url_is_not_handed_to_another_engine():
+    """--voicevox-url は VOICEVOX 本体の場所。Nemo に渡すと本体につないでしまう。"""
+    options = {"url": "http://127.0.0.1:60000", "exe": "run.exe", "autostart": False}
+
+    assert tts.voicevox_engine_options(voicevox.VOICEVOX, options) == options
+    assert tts.voicevox_engine_options(voicevox.NEMO, options) == {"autostart": False}
 
 
 def test_voice_language_match():

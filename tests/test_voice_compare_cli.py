@@ -116,7 +116,7 @@ def test_broken_candidates_file_is_reported(tmp_path, capsys):
 
 
 def test_no_engine_is_reported(tmp_path, capsys, monkeypatch, candidates):
-    monkeypatch.setattr(voicevox, "find_engine_exe", lambda explicit=None: None)
+    monkeypatch.setattr(voicevox, "find_engine_exe", lambda explicit=None, edition=None: None)
     monkeypatch.setattr(voicevox.VoicevoxEngine, "_probe", lambda self, timeout=3.0: None)
     monkeypatch.setattr(voice_compare.tts_mod, "find_powershell", lambda explicit=None: None)
     source = make_script(tmp_path, ["一枚目です。"])

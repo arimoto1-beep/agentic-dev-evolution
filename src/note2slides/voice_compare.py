@@ -16,11 +16,18 @@
 声の大きさの差が印象に混ざらない。
 
 候補は「人気のある話者」ではなく、長時間のeラーニングで問題になりにくい
-条件で選ぶ。判断の根拠は `Candidate.reason` に文章で持たせ、成果物の
+条件で選ぶ。数が多すぎて聞けないので、まず `voice_survey` で全部の声を測って
+絞り、そこから選ぶ。判断の根拠は `Candidate.reason` に文章で持たせ、成果物の
 `compare.md` にそのまま書き出す(あとから選定の理由を確認できるようにする)。
+入れなかった声の理由も `NOT_CHOSEN` に残す。
 
-ここでは標準の音声を変更しない。`voicevox.py` の `PREFERRED_STYLES` は
-人が聴き比べて決めたあとで書き換える。
+候補は使うエンジンを指名できる(VOICEVOX と VOICEVOX Nemo は別のエンジンで、
+公開時のクレジット表記も違う)。エンジンは名前ごとに 1 つだけ作って使い回す。
+
+ここでは標準の音声を変更しない。`voicevox.py` の `preferred_styles` は
+人が聴き比べて決めたあとで書き換える。Gen8 の聴き比べでは `nemo-male3`
+(VOICEVOX Nemo の「男声3/ノーマル」)が選ばれ、それが現在の標準になっている。
+標準を見直したくなったときに、同じ材料をもう一度作れるようにここを残す。
 """
 
 from __future__ import annotations
@@ -82,6 +89,7 @@ class Candidate:
     voice: str  # 「話者/スタイル」
     reason: str  # この候補を入れた理由
     role: str = ""  # 比較の中での位置づけ(基準 / 別スタイル / 別話者 など)
+    engine: str = ""  # 合成に使うエンジン(空なら基準のエンジン)
     speed: float = 1.0
     pitch: float = 0.0
     intonation: float = 1.0
@@ -106,6 +114,7 @@ class Candidate:
             reading.line_pause = self.line_pause
         return replace(
             base,
+            engine=self.engine or base.engine,
             voice=self.voice,
             speed=self.speed,
             pitch=self.pitch,
@@ -135,6 +144,7 @@ class Candidate:
             "speaker": self.speaker,
             "style": self.style,
             "role": self.role,
+            "engine": self.engine,
             "reason": self.reason,
             "speed": self.speed,
             "pitch": self.pitch,
@@ -161,6 +171,7 @@ class Candidate:
                 voice=str(data["voice"]).strip(),
                 reason=str(data.get("reason", "")),
                 role=str(data.get("role", "")),
+                engine=str(data.get("engine", "")),
                 speed=float(data.get("speed", 1.0)),
                 pitch=float(data.get("pitch", 0.0)),
                 intonation=float(data.get("intonation", 1.0)),
@@ -179,35 +190,41 @@ def _optional_float(value) -> Optional[float]:
 
 #: 聴き比べる候補。長時間のeラーニングで問題になりにくい条件で選ぶ。
 #:
-#: 選定の観点は 3 つ。
+#: 選び方は 2 段階。まず `--survey` で使える声(VOICEVOX 127 種類 + VOICEVOX Nemo
+#: 9 種類)を同じ文で測り、`voice_survey.DEFAULT_SCREEN` の条件に入る声だけを残す。
+#: この時点で 136 種類が 20 種類になる。人気や知名度は使わない。
+#: 次に、残ったものから次の観点で選ぶ。
 #:
-#:   1. 30 分聞いても疲れないか(基本周波数が高すぎない・抑揚が過剰でない)
+#:   1. 30 分聞いても疲れないか(高さが低め・抑揚が過剰でない)
 #:   2. 声ではなく内容に注意が向くか(キャラクター性・演技の強さが弱い)
-#:   3. 教材として不自然でないか(語尾が甘えない・断定が弱くならない)
+#:   3. 視聴者を選ばないか(特定の層にだけ強く好かれる声になっていないか)
+#:   4. 比較として意味があるか(基準との違いが 1 つに絞れているか)
 #:
-#: この 3 つで見ると、VOICEVOX の話者の大半は外れる(多くは会話や配信の
-#: キャラクターとして作られていて、長い説明文を読ませる想定ではない)。
-#: 残るのは「読み上げのために用意されたスタイルを持つ話者」と「抑揚の
-#: 振れ幅が小さい落ち着いた話者」で、そこから声域の違う 4 話者を選んだ。
-#: 現行標準(No.7/アナウンス)については、話者を変えずに読み上げ設定だけで
-#: 改善できる余地も比べたいので、設定違いを 2 つ入れている。
+#: 4 のために、候補は「基準と何を変えたものか」が 1 つずつ違うようにしてある。
+#: 同じ役割の候補を 2 つ入れても、聞く時間が倍になるだけで判断は増えない。
+#:
+#: VOICEVOX Nemo からは 2 つだけ入れた。Nemo の声は人格を持たず、公開時の表示も
+#: 話者名を含まない「VOICEVOX Nemo」で済む。キャラクターの声とは前提が違うので、
+#: 女性の声域から 1 つ・男性の声域から 1 つを入れ、残り 7 つは入れていない
+#: (測定値が近く、比較の判断が増えないため)。
 CANDIDATES: Sequence[Candidate] = (
     Candidate(
         id="no7-announce",
         voice="No.7/アナウンス",
-        role="現行の標準(比較の基準)",
+        role="Gen7 までの標準(比較の基準)",
         reason=(
-            "いま標準にしている声。Gen7 までの改善はこの声で確認しているため、"
+            "Gen7 まで標準にしていた声。Gen7 までの改善はこの声で確認しているため、"
             "他の候補が良いかどうかはこれと比べて判断する。"
             "No.7 は特定の人格を演じる設定を持たない話者で、"
             "「アナウンス」は原稿を読むために用意されたスタイル。"
             "語尾を伸ばさず、文末を下げて言い切るので、説明の区切りが分かりやすい。"
+            "測定値は 207Hz / 抑揚 2.70 半音 / 8.48 モーラ秒で、どれも中庸に位置する。"
         ),
     ),
     Candidate(
         id="no7-calm",
         voice="No.7/アナウンス",
-        role="現行標準の設定違い(落ち着かせた版)",
+        role="Gen7 標準の設定違い(落ち着かせた版)",
         speed=0.95,
         intonation=0.9,
         sentence_pause=0.45,
@@ -224,52 +241,98 @@ CANDIDATES: Sequence[Candidate] = (
         ),
     ),
     Candidate(
-        id="no7-storytelling",
-        voice="No.7/読み聞かせ",
-        role="現行標準の別スタイル",
+        id="nemo-female1",
+        voice="女声1/ノーマル",
+        engine="voicevox-nemo",
+        role="人格を持たない声(基準と同じ声域)",
         reason=(
-            "同じ No.7 の、読んで聞かせるために用意されたスタイル。"
-            "声そのものは基準と同じなので、「伝える読み方」と「聞かせる読み方」の"
-            "どちらが教材に合うかだけを比べられる。"
-            "落ち着いて聞ける代わりに、断定や手順の指示が柔らかくなりすぎないかを確認したい。"
+            "VOICEVOX Nemo の声。キャラクターとして作られておらず、名前も「女声1」で、"
+            "聞き手が思い浮かべる人物像や作品が無い。公開時の表示も"
+            "「VOICEVOX Nemo」だけで済み、動画にキャラクター名が出ない。"
+            "教材では、話し手の印象が内容より先に立たないほうがよい。"
+            "225Hz / 抑揚 2.55 半音 / 8.35 モーラ秒と、基準(207Hz / 2.70 / 8.48)に"
+            "最も近い測定値を持つ声を Nemo の女性の声域から選んだ。"
+            "声域と読み方をそろえてあるので、"
+            "「キャラクターの声かどうか」の違いだけを聞き比べられる。"
         ),
     ),
     Candidate(
-        id="aoyama-normal",
-        voice="青山龍星/ノーマル",
-        role="別話者(低音の男性)",
+        id="nemo-male3",
+        voice="男声3/ノーマル",
+        engine="voicevox-nemo",
+        role="現在の標準(人格を持たない声・低い男性の声域)",
         reason=(
-            "低い男性の声。基本周波数が低いほど耳に刺さりにくく、"
-            "長時間の再生でも音量を上げずに聞き取りやすい。"
-            "この話者は淡々と読むため、説明が誇張されず、"
-            "手順や注意事項を事実として伝える教材に向く。"
-            "現在の候補が女性寄りの声に偏っているため、"
-            "声域の違いが長時間の聞きやすさに効くかどうかをここで確認する。"
+            "同じく VOICEVOX Nemo から、男性の声域で最も低く、その中で抑揚も小さい声"
+            "(128Hz / 抑揚 2.90 半音 / 8.68 モーラ秒)。"
+            "基本周波数が低いほど耳に刺さりにくく、音量を上げずに聞き取れるため、"
+            "長時間の再生では有利になりやすい。"
+            "同じ Nemo の男声1(150Hz)は 10.03 モーラ秒と速すぎ、"
+            "男声2 は抑揚が 3.76 半音と大きいので入れていない。"
+            "女性の声だけで比べると、聞き手によって受け取り方が偏る可能性が残る。"
+            "Gen8 で全候補を聞いたうえで、この声を標準のナレーションに決めた。"
         ),
     ),
     Candidate(
-        id="kurono-normal",
-        voice="玄野武宏/ノーマル",
-        role="別話者(中音域の男性)",
+        id="mitama-normal",
+        voice="暁記ミタマ/ノーマル",
+        role="別話者(基準より低く、抑揚の小さい女性)",
         reason=(
-            "既存実装が No.7 の次に選ぶことになっている男性の声"
-            "(`voicevox.py` の PREFERRED_STYLES)。"
-            "青山龍星より明るく、聞き取りやすさでは有利だが、"
-            "そのぶん抑揚が前に出るため、長時間で疲れないかは実際に聞かないと分からない。"
-            "既存の優先順位が妥当かどうかを確かめる意味でも入れている。"
+            "191Hz / 抑揚 1.85 半音 / 7.10 モーラ秒。基準より低く、抑揚は 3 割小さい。"
+            "基準と同じ「キャラクターの声」の枠の中で、"
+            "抑揚を落とすと長時間で楽になるのか、それとも平坦で眠くなるのかを見る。"
+            "前回入れていた冥鳴ひまり(254Hz / 1.88)は、抑揚の小ささが同じで"
+            "高さだけが基準より高く、この候補と役割が重なるため今回は外した。"
         ),
     ),
     Candidate(
-        id="meimei-normal",
-        voice="冥鳴ひまり/ノーマル",
-        role="別話者(低めの女性)",
+        id="rito-normal",
+        voice="離途/ノーマル",
+        role="別話者(最も低く、抑揚の小さい男性)",
         reason=(
-            "落ち着いた低めの女性の声。抑揚の振れ幅が小さく、"
-            "感情を乗せずに読むため、聞き手の注意が声ではなく内容に向きやすい。"
-            "スタイルが 1 つしかない話者で、演技の切り替えを前提にしていない点も"
-            "ナレーション向き。基準と同じ声域で、"
-            "アナウンス調でない読み方を比べる位置づけになる。"
+            "109Hz / 抑揚 1.76 半音 / 8.05 モーラ秒。"
+            "絞り込みに残った 20 種類の中で最も低く、抑揚も最も小さい部類にある。"
+            "低く平坦な読み方が長時間で楽なのか、抑揚が足りず聞き流してしまうのかは、"
+            "測定値では決められないので実際に聞いて判断したい。"
+            "前回入れていた青山龍星/ノーマルは、測ると抑揚が 3.77 半音で"
+            "「淡々と読む」という前回の見立てより大きく、玄野武宏/ノーマルも 3.04 半音と、"
+            "どちらも基準(2.70 半音)を超える。低い男性の声という役割は同じなので、"
+            "同じ役割で抑揚のより小さいこの声に置き換えた。"
         ),
+    ),
+)
+
+#: 絞り込みには残ったが候補に入れなかった声と、その理由。
+#:
+#: 「なぜ入れたか」と同じくらい「なぜ入れなかったか」が残っていないと、
+#: 次に見直すときに同じ検討をやり直すことになる。聞いてみたい声があれば
+#: `compare.json` に足して `--candidates` で渡せる。
+NOT_CHOSEN: Sequence[tuple] = (
+    (
+        "No.7/読み聞かせ",
+        "前回入れていた、基準と同じ話者の別スタイル。5.90 モーラ秒と他より 3 割遅く、"
+        "同じ原稿でも聞く時間が変わるため、比較の条件がそろわない。"
+        "同じ話者の設定違いは no7-calm で見られる。",
+    ),
+    (
+        "冥鳴ひまり/ノーマル",
+        "前回の候補。254Hz / 1.88 半音。抑揚の小ささは mitama-normal と同じ役割で、"
+        "高さだけが基準より高い。役割が重なるので今回は外した。",
+    ),
+    (
+        "青山龍星/ノーマル・玄野武宏/ノーマル",
+        "前回の男性の候補。測ると抑揚が 3.77 / 3.04 半音で基準(2.70)を超える。"
+        "低い男性の声という役割は rito-normal と nemo-male3 が引き継ぐ。",
+    ),
+    (
+        "VOICEVOX Nemo の残り 7 声",
+        "女声2〜6 は女声1 と声域も抑揚も近く、聞いて分かる差にならない。"
+        "男声1 は 10.03 モーラ秒と速く、男声2 は抑揚 3.76 半音と大きい。",
+    ),
+    (
+        "里石ユカ/つぼみ・栗田まろん/ノーマル・雀松朱司/ノーマルほか",
+        "絞り込みに残った他の声。今回の 6 つで"
+        "「高さ」「抑揚」「人格の有無」「読み上げ設定」の違いは一通り聞けるため、"
+        "まずはこの 6 つを聞いて方向を決める。",
     ),
 )
 
@@ -445,23 +508,27 @@ def compare_voices(
     except (OSError, ValueError) as exc:
         raise VoiceCompareError(f"入力を資料に変換できませんでした: {source}\n{exc}") from exc
 
-    owns_engine = engine is None
-    if engine is None:
-        engine = tts_mod.select_engine(base.engine, powershell, base.language, voicevox_options)
-    result.engine = engine.name
+    engines = _Engines(base, powershell, voicevox_options, engine)
     try:
-        _require_voices(engine, candidates, base.language)
+        _require_voices(engines, candidates, base.language)
+        result.engine = " / ".join(engines.names)
         for position, candidate in enumerate(candidates, start=1):
             if on_candidate:
                 on_candidate(position, len(candidates), candidate)
             result.results.append(
                 _run_candidate(
-                    candidate, result.source, outdir, base, engine, keep_work, timeout, on_progress
+                    candidate,
+                    result.source,
+                    outdir,
+                    base,
+                    engines.of(candidate),
+                    keep_work,
+                    timeout,
+                    on_progress,
                 )
             )
     finally:
-        if owns_engine:
-            engine.close()
+        engines.close()
 
     if preview_seconds > 0 and result.succeeded:
         result.preview_path = os.path.join(outdir, PREVIEW_NAME)
@@ -473,17 +540,74 @@ def compare_voices(
     return result
 
 
-def _require_voices(engine, candidates: Sequence[Candidate], language: str) -> None:
+class _Engines:
+    """候補が使うエンジンを、名前ごとに 1 つだけ作って使い回す。
+
+    候補は別々のエンジンの声を指せる(VOICEVOX と VOICEVOX Nemo など)。
+    候補ごとに作り直すと、そのたびにエンジンの起動と音声モデルの読み込みが
+    起きるため、名前ごとに 1 つ作って最後にまとめて閉じる。
+    """
+
+    def __init__(
+        self,
+        base: AudioOptions,
+        powershell: Optional[str],
+        voicevox_options: Optional[dict],
+        engine=None,
+    ) -> None:
+        self._base = base
+        self._powershell = powershell
+        self._voicevox_options = voicevox_options
+        # 呼び出し側が用意したエンジンは、基準のエンジンとして使い、閉じない。
+        self._given = engine
+        self._engines: Dict[str, object] = {}
+        self._owned: List[object] = []
+
+    def of(self, candidate: Candidate):
+        name = candidate.engine or self._base.engine
+        if name not in self._engines:
+            if self._given is not None and not candidate.engine:
+                self._engines[name] = self._given
+            else:
+                engine = tts_mod.select_engine(
+                    name, self._powershell, self._base.language, self._voicevox_options
+                )
+                self._engines[name] = engine
+                self._owned.append(engine)
+        return self._engines[name]
+
+    @property
+    def names(self) -> List[str]:
+        seen = []
+        for engine in self._engines.values():
+            if engine.name not in seen:
+                seen.append(engine.name)
+        return seen
+
+    def close(self) -> None:
+        for engine in self._owned:
+            engine.close()
+        self._owned.clear()
+
+
+def _require_voices(engines: "_Engines", candidates: Sequence[Candidate], language: str) -> None:
     """合成を始める前に、候補の声がすべて使えるかを確かめる。
 
     候補が 6 つあると全部で 20 分以上かかる。名前の間違いは最初に分かるほうがよい。
+    エンジンの用意もここで済ませるので、起動できないエンジンも先に分かる。
     """
     unknown = []
     for candidate in candidates:
+        # エンジンそのものが使えない場合は、候補の書き間違いではないので
+        # ここで止めず、そのまま呼び出し側へ返す(終了コードが変わる)。
+        engine = engines.of(candidate)
         try:
             engine.pick_voice(candidate.voice, language)
         except SpeechError as exc:
-            unknown.append(f"  {candidate.id}: {candidate.voice}\n" + _indent(str(exc), "    "))
+            where = f"({candidate.engine})" if candidate.engine else ""
+            unknown.append(
+                f"  {candidate.id}: {candidate.voice}{where}\n" + _indent(str(exc), "    ")
+            )
     if unknown:
         raise VoiceCompareError(
             "次の候補の声が使えません。\n"
@@ -606,6 +730,7 @@ def _candidate_entry(result: CandidateResult, base: AudioOptions) -> dict:
     narration = result.narration
     entry.update(
         {
+            "engine": narration.engine if narration else result.candidate.engine,
             "voice": result.voice,
             "credit": result.credit,
             "continuous": f"{result.candidate.id}/{CONTINUOUS_NAME}",
@@ -628,7 +753,8 @@ def _write_report(outdir: str, result: CompareResult, preview_seconds: float) ->
         "",
         f"原稿: `{os.path.basename(result.source)}` / エンジン: {result.engine}",
         "",
-        "標準の音声はまだ変更していません。実際に聞いて決めてください。",
+        f"現在の標準は {_default_narration_label()} です。"
+        "このコマンドは標準を変更しないので、変える場合は最後の手順に従ってください。",
         "",
         "## 聞く順番",
         "",
@@ -652,12 +778,22 @@ def _write_report(outdir: str, result: CompareResult, preview_seconds: float) ->
             lines.append(f"| {_timestamp(mark.start)} | {mark.id}（{candidate.voice}） |")
     else:
         lines.append(f"各候補の `<候補>/{CONTINUOUS_NAME}` を続けて聞いてください。")
-    lines += ["", "## 候補", "", "| 候補 | 話者/スタイル | 位置づけ | 設定 | 長さ |", "| --- | --- | --- | --- | --- |"]
+    lines += [
+        "",
+        "## 候補",
+        "",
+        "候補は、使える声を全部測って絞り込んだ中から選んでいます"
+        "(`--survey` を付けると、測定値の一覧 `survey.md` を作れます)。",
+        "",
+        "| 候補 | 話者/スタイル | エンジン | 位置づけ | 設定 | 長さ |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
     for item in result.results:
         candidate = item.candidate
         length = _hms(item.duration) if item.ok else "生成できず"
+        engine = (item.narration.engine if item.narration else "") or candidate.engine or "-"
         lines.append(
-            f"| {candidate.id} | {candidate.voice} | {candidate.role or '-'} | "
+            f"| {candidate.id} | {candidate.voice} | {engine} | {candidate.role or '-'} | "
             f"{candidate.describe_settings(base)} | {length} |"
         )
 
@@ -681,9 +817,9 @@ def _write_report(outdir: str, result: CompareResult, preview_seconds: float) ->
         "",
         "音量をそろえているので、声の大きさの差は印象に混ざりません。",
         "",
-        "## それぞれを候補にした理由",
-        "",
     ]
+    lines += _limiting_lines(result)
+    lines += ["## それぞれを候補にした理由", ""]
     for item in result.results:
         candidate = item.candidate
         lines += [
@@ -701,7 +837,22 @@ def _write_report(outdir: str, result: CompareResult, preview_seconds: float) ->
             ]
             if item.credit:
                 lines.append(f"* 公開時の表示: {item.credit}")
+            for warning in item.narration.warnings if item.narration else []:
+                lines.append(f"* 注意: {warning}")
             lines.append("")
+
+    if NOT_CHOSEN:
+        lines += [
+            "## 候補に入れなかった声",
+            "",
+            "聞く時間が増えるだけで判断が増えない候補は入れていません。"
+            "気になるものがあれば `compare.json` の `candidates` に足して、"
+            "`--candidates` で渡せば同じ条件で作れます。",
+            "",
+        ]
+        for voice, reason in NOT_CHOSEN:
+            lines += [f"* **{voice}** — {reason}"]
+        lines.append("")
 
     failed = result.failed
     if failed:
@@ -719,15 +870,19 @@ def _write_report(outdir: str, result: CompareResult, preview_seconds: float) ->
     lines += [
         "## 決めたあとにすること",
         "",
-        "選んだ候補を標準にする場合は、`src/note2slides/voicevox.py` の",
-        "`PREFERRED_STYLES` の先頭を、その話者/スタイルに書き換えます。",
+        f"現在の標準は {_default_narration_label()} です。",
+        "別の候補を標準にする場合は、`src/note2slides/voicevox.py` にある",
+        "そのエンジン(`VOICEVOX` / `NEMO`)の `preferred_styles` の先頭を、",
+        "選んだ話者/スタイルに書き換えます。エンジンをまたいで変える場合は、",
+        "同じファイルの `EDITIONS` の並び順(auto がどちらを先に試すか)も",
+        "入れ替えてください。",
         "読み上げ設定も変えた候補を選んだ場合は、`audio_cli.py` の既定値",
         "(`--speed` / `--intonation` / `--sentence-pause` / `--line-pause`)も",
         "あわせて変更してください。既定を変えずに 1 回だけ試すなら、`--voice` で指定できます。",
         "",
         "```bash",
         ".venv/Scripts/python.exe -m note2slides.video_cli build/sample.pptx -o build/sample.mp4 \\",
-        '    --voice "選んだ話者/スタイル"',
+        '    --engine voicevox-nemo --voice "選んだ話者/スタイル"',
         "```",
         "",
     ]
@@ -737,11 +892,48 @@ def _write_report(outdir: str, result: CompareResult, preview_seconds: float) ->
     return os.path.abspath(path)
 
 
+def _limiting_lines(result: CompareResult) -> List[str]:
+    """ピークを抑えた量を候補ごとに出す。
+
+    合成音声は平均に対してピークだけが飛び出すため、目標の音量まで持ち上げると
+    飛び出した分を抑えることになる(`audio.py`)。抑える量は声によって違い、
+    大きいほど音の質が変わる。処理は全候補で同じでも、**結果として受ける影響は
+    同じではない** ので、聞く前に分かるようにしておく。
+    """
+    rows = [
+        (item.candidate.id, item.narration.loudness)
+        for item in result.succeeded
+        if item.narration and item.narration.loudness
+    ]
+    if not rows:
+        return []
+    lines = [
+        "ただし、ピークを抑えた量は声によって違います。抑える量が大きい候補は、"
+        "そのぶん音の質も変わっています(声そのものの違いとは別に効きます)。",
+        "",
+        "| 候補 | 合成時の音量 | 持ち上げた量 | ピークを抑えた量 |",
+        "| --- | --: | --: | --: |",
+    ]
+    for candidate_id, loudness in rows:
+        lines.append(
+            f"| {candidate_id} | {loudness.measured_lufs:.1f} LUFS | "
+            f"{loudness.gain_db:+.1f} dB | {loudness.limit_db:.1f} dB |"
+        )
+    lines.append("")
+    return lines
+
+
 def _slides_of(result: CompareResult) -> int:
     for item in result.succeeded:
         if item.narration:
             return item.narration.count
     return 0
+
+
+def _default_narration_label() -> str:
+    """いま標準になっている声。合成に使われる設定から引くので、書き換え忘れが起きない。"""
+    engine, voice = tts_mod.default_narration()
+    return f"`{engine}` の「{voice}」" if voice else f"`{engine}`"
 
 
 def _timestamp(seconds: float) -> str:

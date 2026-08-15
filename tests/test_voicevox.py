@@ -8,6 +8,7 @@ import json
 import os
 import urllib.parse
 import wave
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -37,6 +38,21 @@ SPEAKERS = [
         "styles": [{"name": "ノーマル", "id": 3, "type": "talk"}],
     },
 ]
+
+#: VOICEVOX Nemo の話者。標準にした「男声3」は一覧の先頭ではない。
+NEMO_SPEAKERS = [
+    {
+        "name": "女声1",
+        "speaker_uuid": "uuid-f1",
+        "styles": [{"name": "ノーマル", "id": 0, "type": "talk"}],
+    },
+    {
+        "name": "男声3",
+        "speaker_uuid": "uuid-m3",
+        "styles": [{"name": "ノーマル", "id": 8, "type": "talk"}],
+    },
+]
+
 
 def mora(text, pitch=5.5):
     return {
@@ -77,12 +93,13 @@ class FakeHttp:
     #: つないでから決め直したときの音程。
     JOINED_PITCH = 5.5
 
-    def __init__(self, fail_on=None, missing=False):
+    def __init__(self, fail_on=None, missing=False, speakers=None):
         self.calls = []
         self.payloads = []
         self.mora_data_calls = []
         self.fail_on = fail_on or ()
         self.missing = missing
+        self.speakers = SPEAKERS if speakers is None else speakers
 
     def __call__(self, url, data=None, timeout=60.0):
         self.calls.append(url)
@@ -91,7 +108,7 @@ class FakeHttp:
         if "/version" in url:
             return b'"0.25.2"'
         if "/speakers" in url:
-            return json.dumps(SPEAKERS).encode("utf-8")
+            return json.dumps(self.speakers).encode("utf-8")
         if "/initialize_speaker" in url:
             return b""
         if "/accent_phrases" in url:
@@ -158,7 +175,7 @@ def test_engine_is_not_started_twice(engine, http):
 
 def test_unreachable_engine_explains_what_to_do(monkeypatch):
     monkeypatch.setattr(voicevox, "_request", FakeHttp(missing=True))
-    monkeypatch.setattr(voicevox, "find_engine_exe", lambda explicit=None: None)
+    monkeypatch.setattr(voicevox, "find_engine_exe", lambda explicit=None, edition=None: None)
 
     with pytest.raises(SpeechNotAvailableError) as excinfo:
         VoicevoxEngine(url="http://127.0.0.1:50021").ensure_ready()
@@ -185,6 +202,72 @@ def test_url_can_be_set_by_env(monkeypatch, http):
 
 
 # ---------------------------------------------------------------------------
+# VOICEVOX Nemo(同じ API を話す別のエンジン)
+# ---------------------------------------------------------------------------
+
+
+def test_nemo_connects_to_its_own_port(monkeypatch):
+    """同じ既定値を使うと、VOICEVOX 本体につないで別の声を合成してしまう。"""
+    monkeypatch.setenv("VOICEVOX_NEMO_URL", "")
+    engine = VoicevoxEngine(edition=voicevox.NEMO)
+
+    assert engine.name == "voicevox-nemo"
+    assert engine.base_url == "http://127.0.0.1:50121"
+
+
+def test_nemo_url_can_be_set_by_its_own_env(monkeypatch):
+    monkeypatch.setenv("VOICEVOX_NEMO_URL", "http://127.0.0.1:60001")
+    monkeypatch.setenv("VOICEVOX_URL", "http://127.0.0.1:60000")
+
+    assert VoicevoxEngine(edition=voicevox.NEMO).base_url == "http://127.0.0.1:60001"
+
+
+def test_nemo_engine_is_found_where_voicevox_installs_it(tmp_path, monkeypatch):
+    """追加エンジンは UUID の付いたディレクトリに入るので、名前を決め打ちできない。"""
+    engine_dir = tmp_path / "voicevox" / "vvpp-engines" / "VOICEVOX_Nemo_Engine+208cf94d-43d2"
+    engine_dir.mkdir(parents=True)
+    (engine_dir / "run.exe").write_text("", encoding="utf-8")
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    monkeypatch.delenv("VOICEVOX_NEMO_ENGINE_PATH", raising=False)
+
+    found = voicevox.find_engine_exe(edition=voicevox.NEMO)
+
+    assert found == os.path.abspath(str(engine_dir / "run.exe"))
+    assert voicevox.is_installed(edition=voicevox.NEMO)
+
+
+def test_nemo_speaks_with_the_standard_narration_voice(monkeypatch):
+    """指定が無ければ標準のナレーション音声を使う。
+
+    一覧の順ではなく名前で選ぶので、話者が増えても声は変わらない。
+    名前を書き間違えると黙って別の声(一覧の先頭)になるため、ここで確かめる。
+    """
+    monkeypatch.setattr(voicevox, "_request", FakeHttp(speakers=NEMO_SPEAKERS))
+    engine = VoicevoxEngine(autostart=False, edition=voicevox.NEMO)
+
+    style = engine.pick_style()
+
+    assert voicevox.NEMO.preferred_styles[0] == "男声3/ノーマル"
+    assert style.name == "男声3/ノーマル"
+    assert style.credit == "VOICEVOX Nemo"  # 公開時に話者名を出さなくてよい
+
+
+def test_auto_tries_nemo_before_voicevox():
+    """標準のナレーションが Nemo の声なので、エンジンの並びも Nemo が先。"""
+    assert list(voicevox.EDITIONS) == ["voicevox-nemo", "voicevox"]
+
+
+def test_nemo_credit_does_not_name_a_character(monkeypatch, http):
+    """Nemo の声には人格が無く、表記は話者によらず「VOICEVOX Nemo」でよい。"""
+    engine = VoicevoxEngine(autostart=False, edition=voicevox.NEMO)
+
+    style = engine.list_styles()[0]
+
+    assert style.credit == "VOICEVOX Nemo"
+    assert style.to_voice().engine == "voicevox-nemo"
+
+
+# ---------------------------------------------------------------------------
 # 音声の選択
 # ---------------------------------------------------------------------------
 
@@ -208,8 +291,10 @@ def test_narration_style_is_preferred(engine):
     assert engine.pick_style().name == "No.7/アナウンス"
 
 
-def test_first_talk_style_is_used_when_none_is_preferred(engine, monkeypatch):
-    monkeypatch.setattr(voicevox, "PREFERRED_STYLES", ())
+def test_first_talk_style_is_used_when_none_is_preferred(http):
+    engine = VoicevoxEngine(
+        autostart=False, edition=replace(voicevox.VOICEVOX, preferred_styles=())
+    )
 
     style = engine.pick_style()
 
