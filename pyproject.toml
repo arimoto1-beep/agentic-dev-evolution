@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "note2slides"
 version = "0.1.0"
-description = "note 記事(Markdown)から eラーニング用のプレゼンテーション(.pptx)・スライド画像・ナレーション音声・ナレーション付き動画を生成する"
+description = "note 記事(Markdown ファイル / 公開記事の URL)から eラーニング用のプレゼンテーション(.pptx)・スライド画像・ナレーション音声・ナレーション付き動画を生成する"
 requires-python = ">=3.10"
 dependencies = [
     "python-pptx>=1.0",

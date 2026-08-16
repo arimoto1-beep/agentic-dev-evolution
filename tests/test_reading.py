@@ -50,10 +50,24 @@ def test_question_and_exclamation_end_a_sentence():
     assert texts(plan) == ["そうでしょうか?", "そうです!"]
 
 
-def test_closing_bracket_stays_with_its_sentence():
+def test_period_inside_brackets_does_not_end_the_sentence():
+    # 引用は文の一部なので、ここで切ると「と書かれています。」だけが独立した
+    # セリフになり、間が空いて読み直したように聞こえる。
     plan = plan_reading("「これは大事です。」と書かれています。")
 
-    assert texts(plan) == ["「これは大事です。」", "と書かれています。"]
+    assert texts(plan) == ["「これは大事です。」と書かれています。"]
+
+
+def test_question_inside_brackets_does_not_end_the_sentence():
+    plan = plan_reading("「トークンって何？」と聞かれると、説明しにくい言葉です。")
+
+    assert texts(plan) == ["「トークンって何?」と聞かれると、説明しにくい言葉です。"]
+
+
+def test_sentence_ends_after_the_bracket_is_closed():
+    plan = plan_reading("これは「引用」です。次の文です。")
+
+    assert texts(plan) == ["これは「引用」です。", "次の文です。"]
 
 
 def test_long_sentence_is_split_at_a_comma():
@@ -133,6 +147,14 @@ def test_pictographs_are_dropped():
 
     assert texts(plan) == ["できました次へ進みます。"]
     assert any("絵文字" in note for note in plan.notes)
+
+
+def test_the_placeholder_circle_is_kept():
+    """伏せ字の「○」は落とさない(落とすと「最大万トークン」になってしまう)。"""
+    plan = plan_reading("「最大○万トークンまで入力できます」")
+
+    assert texts(plan) == ["「最大○万トークンまで入力できます」"]
+    assert plan.notes == []
 
 
 def test_rule_lines_are_dropped():

@@ -1,8 +1,10 @@
-"""note 記事(Markdown)から eラーニング用のスライドと、その画像を生成する。
+"""note 記事から eラーニング用のスライドと、その画像を生成する。
 
-資料の生成は 3 段階に分かれている。
+入力は手元の Markdown ファイルでも、公開されている note 記事の URL でもよい。
+どちらも Article になるところまでが読み取り側の仕事で、そこから先は同じ。
 
     markdown_reader : Markdown -> Article(ブロック列)
+    note_source     : note URL -> Article(記事 API から本文と画像を取り込む)
     planner         : Article  -> Deck(スライド構成)
     renderer        : Deck     -> .pptx
 

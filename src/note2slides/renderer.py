@@ -349,23 +349,31 @@ class Renderer:
                 oxml_utils.set_normal_autofit(frame, max(0.6, avail / width_pt))
 
     def _write_runs(self, paragraph, runs: List[Run], size: float, color, bold: bool = False) -> None:
-        style = self.style
         for source in runs:
-            run = paragraph.add_run()
-            run.text = source.text
-            font = run.font
-            font.size = Pt(size * (0.94 if source.code else 1.0))
-            font.bold = bold or source.bold
-            font.italic = source.italic
-            if source.link:
-                run.hyperlink.address = source.link
-                font.color.rgb = RGBColor(*style.color_accent)
-            else:
-                font.color.rgb = RGBColor(*color)
-            if source.code:
-                oxml_utils.set_run_fonts(run, style.font_mono, style.font_mono)
-            else:
-                oxml_utils.set_run_fonts(run, style.font_latin, style.font_ea)
+            # 記事の中の改行は、段落を分けずに行だけを変える(`<a:br/>`)。
+            for index, piece in enumerate(source.text.split("\n")):
+                if index:
+                    oxml_utils.add_line_break(paragraph)
+                if piece:
+                    self._write_run(paragraph, source.with_text(piece), size, color, bold)
+
+    def _write_run(self, paragraph, source: Run, size: float, color, bold: bool = False) -> None:
+        style = self.style
+        run = paragraph.add_run()
+        run.text = source.text
+        font = run.font
+        font.size = Pt(size * (0.94 if source.code else 1.0))
+        font.bold = bold or source.bold
+        font.italic = source.italic
+        if source.link:
+            run.hyperlink.address = source.link
+            font.color.rgb = RGBColor(*style.color_accent)
+        else:
+            font.color.rgb = RGBColor(*color)
+        if source.code:
+            oxml_utils.set_run_fonts(run, style.font_mono, style.font_mono)
+        else:
+            oxml_utils.set_run_fonts(run, style.font_latin, style.font_ea)
 
 
 # ---------------------------------------------------------------------------

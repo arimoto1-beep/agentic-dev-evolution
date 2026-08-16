@@ -41,6 +41,22 @@ from .style import Style
 _TERMINATORS = "。．.！？!?"
 _CLOSERS = "」』）)”\"'】〉》〕］]"
 
+# 括弧の中の句点・疑問符は、文の終わりではない。
+#
+#     今回は「そもそもAIは文章をどう扱っているのか？」というところから整理します。
+#
+# 「？」で切ると、1 つの文が 2 行に割れて画面にも読み上げにも出てしまう。
+# そこで対応の取れる括弧だけを数え、開いている間は文を切らない。閉じ忘れが
+# あった場合は切らない側に倒れるが、切り所を間違えるより行が長くなるほうが害が
+# 小さい(長い行は読み上げ側が読点で区切る → reading.ReadingStyle.max_chars)。
+_BRACKET_PAIRS = {
+    "「": "」", "『": "』", "（": "）", "(": ")", "【": "】", "〈": "〉",
+    "《": "》", "〔": "〕", "［": "］", "[": "]", "｛": "｝", "{": "}",
+    "“": "”", "‘": "’",
+}
+_OPENERS = "".join(_BRACKET_PAIRS)
+_CLOSE_TO_OPEN = {close: open_ for open_, close in _BRACKET_PAIRS.items()}
+
 
 @dataclass
 class PlannerOptions:
@@ -341,13 +357,18 @@ def split_sentences(runs: List[Run]) -> List[List[Run]]:
     """Run 列を文単位へ分割する。文字は削除も追加もしない。"""
     sentences: List[List[Run]] = []
     current: List[Run] = []
+    depth = 0  # 開いている括弧の数(中の句点では切らない)
     for run in runs:
         text = run.text
         start = 0
         i = 0
         while i < len(text):
             ch = text[i]
-            if ch in _TERMINATORS and (ch not in ".．" or _ascii_period_end(text, i)):
+            if ch in _OPENERS:
+                depth += 1
+            elif ch in _CLOSE_TO_OPEN:
+                depth = max(0, depth - 1)
+            elif depth == 0 and ch in _TERMINATORS and (ch not in ".．" or _ascii_period_end(text, i)):
                 end = i + 1
                 while end < len(text) and text[end] in _CLOSERS:
                     end += 1

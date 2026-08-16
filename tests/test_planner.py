@@ -162,8 +162,24 @@ class TestSplitSentences:
     def test_japanese_period(self):
         assert [_t(s) for s in split_sentences([Run("あ。い。")])] == ["あ。", "い。"]
 
-    def test_closing_bracket_is_attached(self):
-        assert [_t(s) for s in split_sentences([Run("「あ。」い。")])] == ["「あ。」", "い。"]
+    def test_period_inside_brackets_is_not_a_boundary(self):
+        # 「…。」と書かれています。は 1 文。括弧の中で切ると、続きの「と〜」だけが
+        # 別の行・別のセリフになってしまう。
+        assert [_t(s) for s in split_sentences([Run("「あ。」と書いた。")])] == ["「あ。」と書いた。"]
+
+    def test_brackets_close_before_the_next_sentence(self):
+        assert [_t(s) for s in split_sentences([Run("「あ」です。次。")])] == ["「あ」です。", "次。"]
+
+    def test_question_inside_brackets_is_not_a_boundary(self):
+        runs = [Run("今回は「何？」から整理します。次に進みます。")]
+        assert [_t(s) for s in split_sentences(runs)] == [
+            "今回は「何？」から整理します。",
+            "次に進みます。",
+        ]
+
+    def test_unclosed_bracket_does_not_split(self):
+        # 閉じ忘れは、切り所を間違えるより行が長くなるほうへ倒す。
+        assert [_t(s) for s in split_sentences([Run("「あ。い。")])] == ["「あ。い。"]
 
     def test_decimal_point_is_not_a_boundary(self):
         assert [_t(s) for s in split_sentences([Run("値は 3.5 です。")])] == ["値は 3.5 です。"]

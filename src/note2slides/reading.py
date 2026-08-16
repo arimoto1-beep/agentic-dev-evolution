@@ -51,6 +51,16 @@ SENTENCE_ENDINGS = "。！？!?"
 CLAUSE_ENDINGS = "、，,"
 #: 文末記号のあとに続いたら、前の文に付ける記号。
 CLOSING_BRACKETS = "」』）)】〉》〕｝}\"'”’"
+#: 対応の取れる括弧。この中にある句点・疑問符は文の終わりではないので切らない
+#: (「トークンって何？」と聞かれると… を 2 文にしないため)。同じ判断を資料側でも
+#: 行う(planner._BRACKET_PAIRS)。
+_BRACKET_PAIRS = {
+    "「": "」", "『": "』", "（": "）", "(": ")", "【": "】", "〈": "〉",
+    "《": "》", "〔": "〕", "［": "］", "[": "]", "｛": "｝", "{": "}",
+    "“": "”", "‘": "’",
+}
+_OPENING_BRACKETS = "".join(_BRACKET_PAIRS)
+_CLOSE_TO_OPEN = {close: open_ for open_, close in _BRACKET_PAIRS.items()}
 
 _URL = re.compile(r"https?://\S+|www\.[^\s、。]+")
 # 行頭の箇条書き記号。文中の「・」は区切り文字(「A・B」)なので、行頭だけを見る。
@@ -59,12 +69,17 @@ _LIST_MARKER = re.compile(r"^[\s　]*(?:[•‣▪◦・][\s　]*|(?:[-*+]|[#＃
 # 装飾用の罫線や区切り線だけの行。
 _RULE_LINE = re.compile(r"^[\s　]*[-=_─━＝\*]{3,}[\s　]*$")
 # 絵文字・記号のうち、読み上げても音にならないもの。
+#
+# 「○」(U+25CB)だけは図形の範囲にあるが除く。日本語では伏せ字として数や語の
+# 代わりに書かれ(「最大○万トークン」「1トークン＝○文字」)、落とすと
+# 「最大万トークン」になって文の意味が変わってしまう。合成エンジンは
+# 「マル」と読むので、そのまま渡せば画面の表記どおりに読み上げられる。
 _PICTOGRAPH = re.compile(
     "["
     "\U0001f000-\U0001faff"  # 絵文字
     "←-⇿"  # 矢印
     "─-╿"  # 罫線
-    "▀-◿"  # ブロック・図形
+    "▀-◊◌-◿"  # ブロック・図形(○ を除く)
     "☀-➿"  # その他の記号
     "️‍⃣"  # 異体字セレクタ・結合子
     "]"
@@ -268,12 +283,19 @@ def _split_sentences(line: str) -> List[str]:
     """句点・感嘆符・疑問符で文に分ける(記号は文の側に残す)。"""
     sentences: List[str] = []
     current = ""
+    depth = 0  # 開いている括弧の数(中の句点では切らない)
     position = 0
     while position < len(line):
         char = line[position]
         current += char
         position += 1
-        if char not in SENTENCE_ENDINGS:
+        if char in _OPENING_BRACKETS:
+            depth += 1
+            continue
+        if char in _CLOSE_TO_OPEN:
+            depth = max(0, depth - 1)
+            continue
+        if depth > 0 or char not in SENTENCE_ENDINGS:
             continue
         # 「そうです。」と書いてある のように、閉じ括弧は前の文に付ける。
         while position < len(line) and line[position] in CLOSING_BRACKETS:

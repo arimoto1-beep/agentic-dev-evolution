@@ -1,4 +1,12 @@
-"""コマンドラインインターフェース。"""
+"""コマンドラインインターフェース。
+
+入力は、手元の Markdown ファイルと、公開されている note 記事の URL の
+どちらでもよい。URL の場合は note の公開 API から本文と画像を取り込み、
+そこから先(スライド構成 -> 資料)はファイル入力とまったく同じ処理を通る。
+
+    python -m note2slides samples/sample_article.md -o build/sample.pptx
+    python -m note2slides https://note.com/<ユーザー>/n/<記事キー> -o build/article.pptx
+"""
 
 from __future__ import annotations
 
@@ -9,18 +17,31 @@ import sys
 from typing import List, Optional
 
 from . import __version__
+from . import note_source
 from .markdown_reader import parse_article_file
+from .model import Article
+from .note_source import NoteError
 from .planner import PlannerOptions, plan_deck
 from .renderer import render_deck
 from .style import Style
+
+EXIT_OK = 0
+EXIT_USAGE = 2
+EXIT_EXISTS = 3
+EXIT_FETCH_FAILED = 4
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="note2slides",
-        description="note 記事(Markdown)から 16:9 のプレゼンテーション(.pptx)を生成します。",
+        description=(
+            "note 記事(Markdown ファイル、または公開記事の URL)から "
+            "16:9 のプレゼンテーション(.pptx)を生成します。"
+        ),
     )
-    parser.add_argument("input", help="入力する Markdown ファイル")
+    parser.add_argument(
+        "input", help="入力する Markdown ファイル、または公開 note 記事の URL"
+    )
     parser.add_argument(
         "-o", "--output", help="出力する .pptx のパス(既定: 入力と同じ場所・同じ名前)"
     )
@@ -45,6 +66,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dump-plan", metavar="PATH", help="スライド構成を JSON として書き出す"
     )
+
+    url_group = parser.add_argument_group("URL を入力にする場合")
+    url_group.add_argument(
+        "--image-dir",
+        metavar="DIR",
+        help="取り込んだ記事の画像を置く場所(既定: 出力と同じ場所の <名前>_images)",
+    )
+    url_group.add_argument(
+        "--dump-article",
+        metavar="PATH",
+        help="取り込んだ記事の内容を JSON として書き出す(本文の欠落・混入の確認用)",
+    )
+    url_group.add_argument(
+        "--fetch-timeout",
+        type=float,
+        default=note_source.DEFAULT_TIMEOUT,
+        help=f"記事と画像の取得の待ち時間(秒、既定: {note_source.DEFAULT_TIMEOUT:g})",
+    )
+    url_group.add_argument(
+        "--user-agent",
+        default=note_source.DEFAULT_USER_AGENT,
+        help="取得に使う User-Agent",
+    )
+
     parser.add_argument("--quiet", action="store_true", help="進捗を表示しない")
     parser.add_argument("--version", action="version", version=f"note2slides {__version__}")
     return parser
@@ -52,18 +97,24 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    from_url = note_source.is_http_url(args.input)
 
-    if not os.path.isfile(args.input):
+    if not from_url and not os.path.isfile(args.input):
         print(f"入力ファイルが見つかりません: {args.input}", file=sys.stderr)
-        return 2
+        return EXIT_USAGE
 
-    output = args.output or os.path.splitext(args.input)[0] + ".pptx"
+    try:
+        output = args.output or _default_output(args.input, from_url)
+    except NoteError as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_USAGE
+
     if os.path.exists(output) and not args.force:
         print(
             f"出力先が既に存在します: {output}\n上書きする場合は --force を付けてください。",
             file=sys.stderr,
         )
-        return 3
+        return EXIT_EXISTS
 
     style = Style(
         font_latin=args.font_latin,
@@ -77,7 +128,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         title_slide=not args.no_title_slide,
     )
 
-    article = parse_article_file(args.input)
+    if from_url:
+        try:
+            article = _fetch(args, output)
+        except NoteError as exc:
+            print(str(exc), file=sys.stderr)
+            return EXIT_FETCH_FAILED
+    else:
+        article = parse_article_file(args.input)
+
     deck = plan_deck(article, style=style, options=options)
 
     output_dir = os.path.dirname(os.path.abspath(output))
@@ -93,7 +152,52 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if not args.quiet:
         print(f"{len(deck.slides)} 枚のスライドを生成しました: {output}")
-    return 0
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# URL からの取り込み
+# ---------------------------------------------------------------------------
+
+
+def _default_output(source: str, from_url: bool) -> str:
+    """出力先の既定。ファイルは同じ名前、URL は記事キーを名前にする。"""
+    if not from_url:
+        return os.path.splitext(source)[0] + ".pptx"
+    return note_source.parse_note_key(source) + ".pptx"
+
+
+def _fetch(args, output: str) -> Article:
+    """公開 note 記事を取り込み、Article として返す。"""
+    image_dir = args.image_dir or os.path.splitext(os.path.abspath(output))[0] + "_images"
+    result = note_source.load_note_article(
+        args.input,
+        image_dir,
+        timeout=args.fetch_timeout,
+        user_agent=args.user_agent,
+    )
+
+    if args.dump_article:
+        _write_json(args.dump_article, result.to_dict())
+
+    for warning in result.warnings:
+        print(f"警告: {warning}", file=sys.stderr)
+
+    if not args.quiet:
+        print(f"記事を取り込みました: {result.source.title}")
+        print(f"  {result.source.url}")
+        print(f"  本文 {len(result.article.blocks)} ブロック / 画像 {len(result.images)} 枚")
+        for image in result.images:
+            print(f"    {os.path.basename(image.path)}  {image.width}x{image.height}")
+    return result.article
+
+
+def _write_json(path: str, data: dict) -> None:
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
 
 
 if __name__ == "__main__":

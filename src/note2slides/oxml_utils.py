@@ -130,6 +130,22 @@ def set_indent(paragraph, margin_left_emu: int, hanging_emu: int = 0) -> None:
     pPr.set("indent", str(int(-hanging_emu)))
 
 
+def add_line_break(paragraph) -> None:
+    """段落の途中に改行(`<a:br/>`)を入れる。
+
+    記事の中の改行(Markdown の行末 2 空白、note の `<br>`)は、段落を分けずに
+    行だけを変える。`<a:t>` の中に改行文字を置いても描画側は空白として扱うため、
+    行を変えるには要素として入れる必要がある。
+    """
+    p = paragraph._p
+    br = p.makeelement(qn("a:br"), {})
+    end_properties = p.find(qn("a:endParaRPr"))
+    if end_properties is not None:
+        end_properties.addprevious(br)
+    else:
+        p.append(br)
+
+
 def set_run_fonts(run, latin: str, east_asian: str, complex_script: Optional[str] = None) -> None:
     """欧文・日本語それぞれのフォントを指定する。"""
     rPr = run._r.get_or_add_rPr()

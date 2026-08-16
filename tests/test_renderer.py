@@ -165,3 +165,31 @@ def test_image_is_embedded(tmp_path):
     picture = pictures[0]
     assert picture.width <= SLIDE_WIDTH_EMU
     assert picture.top + picture.height <= SLIDE_HEIGHT_EMU
+
+
+def test_line_break_inside_a_paragraph_is_a_real_break(tmp_path):
+    """記事の中の改行は、段落を分けずに行だけを変える(`<a:br/>`)。
+
+    `<a:t>` の中に改行文字を置いても描画側は空白として扱うため、note の `<br>`
+    で書かれた図(文章 ↓ トークン …)が 1 行につながってしまう。
+    """
+    article = parse_article("## 図\n\n文章  \n↓  \nトークン\n")
+    deck = plan_deck(article, options=PlannerOptions(title_slide=False))
+    out = tmp_path / "br.pptx"
+    render_deck(deck, str(out))
+
+    prs = Presentation(str(out))
+    paragraphs = [
+        p
+        for slide in prs.slides
+        for shape in slide.shapes
+        if shape.has_text_frame
+        for p in shape.text_frame.paragraphs
+        if "".join(r.text for r in p.runs).startswith("文章")
+    ]
+    assert len(paragraphs) == 1
+    body = paragraphs[0]
+    assert len(body._p.findall(qn("a:br"))) == 2
+    assert [r.text for r in body.runs] == ["文章", "↓", "トークン"]
+    # python-pptx は <a:br/> を垂直タブとして読み直す(読み上げ側はここで行を分ける)。
+    assert body.text == "文章\v↓\vトークン"
