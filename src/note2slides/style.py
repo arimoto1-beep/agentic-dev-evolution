@@ -72,6 +72,9 @@ class Style:
     # 箇条書きのインデント (inch / 段)
     indent_per_level: float = 0.42
 
+    # 1 枚に複数の中身(文章と図など)を並べるときの、上下の間隔 (inch)
+    part_gap: float = 0.24
+
     def body_size(self, level: int) -> float:
         sizes = self.body_sizes
         if level in sizes:

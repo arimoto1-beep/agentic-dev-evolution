@@ -459,17 +459,24 @@ def prepare_source(source: str, workdir: str) -> str:
     """Markdown を渡された場合だけ、先に資料(.pptx)にする。
 
     候補ごとに作り直すと原稿がずれる可能性があるため、1 回だけ作って
-    すべての候補で同じファイルを読む。
+    すべての候補で同じファイルを読む。記事と教材シナリオのどちらでも、
+    資料の作り方は `note2slides` と同じにする(聴き比べる原稿が、実際に
+    動画になる原稿と食い違わないようにするため)。
     """
     if not source.lower().endswith(".md"):
         return source
     from .markdown_reader import parse_article_file
     from .planner import plan_deck
     from .renderer import render_deck
+    from .scenario import build_deck, is_scenario_file, read_scenario
 
     os.makedirs(workdir, exist_ok=True)
     output = os.path.join(workdir, SOURCE_NAME)
-    render_deck(plan_deck(parse_article_file(source)), output)
+    if is_scenario_file(source):
+        deck = build_deck(read_scenario(source))
+    else:
+        deck = plan_deck(parse_article_file(source))
+    render_deck(deck, output)
     return output
 
 

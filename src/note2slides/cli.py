@@ -1,11 +1,20 @@
 """コマンドラインインターフェース。
 
-入力は、手元の Markdown ファイルと、公開されている note 記事の URL の
-どちらでもよい。URL の場合は note の公開 API から本文と画像を取り込み、
-そこから先(スライド構成 -> 資料)はファイル入力とまったく同じ処理を通る。
+入力は 3 種類あるが、どれも `Deck`(スライド構成)になったあとは同じ処理を
+通る。資料・スライド画像・音声・動画の側に分岐は無い。
+
+    記事(.md)        markdown_reader -> Article -> planner -> Deck
+    公開 note 記事    note_source     -> Article -> planner -> Deck
+    教材シナリオ(.md) scenario        -> Deck
+
+記事入力は、記事の文章構造からスライド構成を推測する。教材シナリオは
+「この画面にこれを出し、こう説明する」を先に決めて書いたものなので、推測は
+行わず、書かれたとおりの枚数・画面・ナレーションにする。front matter に
+`type: scenario` があるものを教材シナリオとして扱う。
 
     python -m note2slides samples/sample_article.md -o build/sample.pptx
     python -m note2slides https://note.com/<ユーザー>/n/<記事キー> -o build/article.pptx
+    python -m note2slides samples/lesson_scenario.md -o build/lesson.pptx
 """
 
 from __future__ import annotations
@@ -18,17 +27,27 @@ from typing import List, Optional
 
 from . import __version__
 from . import note_source
+from . import scenario as scenario_mod
 from .markdown_reader import parse_article_file
-from .model import Article
+from .model import Article, Deck
 from .note_source import NoteError
 from .planner import PlannerOptions, plan_deck
 from .renderer import render_deck
+from .scenario import ScenarioError
 from .style import Style
 
 EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_EXISTS = 3
 EXIT_FETCH_FAILED = 4
+
+#: 記事の構成を組み立てるための指定。教材シナリオには構成が書かれているので、
+#: 指定されていたら黙って無視せずに知らせる(シナリオどおりに作らなくなる)。
+_ARTICLE_ONLY = (
+    ("no_notes", "--no-notes"),
+    ("no_split_sentences", "--no-split-sentences"),
+    ("no_title_slide", "--no-title-slide"),
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -40,7 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "input", help="入力する Markdown ファイル、または公開 note 記事の URL"
+        "input",
+        help="入力する Markdown ファイル(記事 / 教材シナリオ)、または公開 note 記事の URL",
     )
     parser.add_argument(
         "-o", "--output", help="出力する .pptx のパス(既定: 入力と同じ場所・同じ名前)"
@@ -65,6 +85,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--font-mono", default=Style.font_mono, help="等幅フォント")
     parser.add_argument(
         "--dump-plan", metavar="PATH", help="スライド構成を JSON として書き出す"
+    )
+    parser.add_argument(
+        "--scenario",
+        action="store_true",
+        help="入力を教材シナリオとして読む(front matter の `type: scenario` が"
+        "無い場合はエラーにする)",
     )
 
     url_group = parser.add_argument_group("URL を入力にする場合")
@@ -103,6 +129,26 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"入力ファイルが見つかりません: {args.input}", file=sys.stderr)
         return EXIT_USAGE
 
+    if args.scenario and from_url:
+        print(
+            "教材シナリオは Markdown ファイルとして渡してください"
+            "(URL からは記事として取り込みます)。",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
+    from_scenario = not from_url and (args.scenario or scenario_mod.is_scenario_file(args.input))
+    if from_scenario:
+        rejected = [option for name, option in _ARTICLE_ONLY if getattr(args, name)]
+        if rejected:
+            print(
+                f"教材シナリオでは使えない指定です: {' / '.join(rejected)}\n"
+                "  記事から構成を組み立てるときの指定で、シナリオには構成が"
+                "書かれているため使いません。",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+
     try:
         output = args.output or _default_output(args.input, from_url)
     except NoteError as exc:
@@ -121,23 +167,28 @@ def main(argv: Optional[List[str]] = None) -> int:
         font_ea=args.font_ea,
         font_mono=args.font_mono,
     )
-    options = PlannerOptions(
-        deck_title=args.title,
-        split_sentences=not args.no_split_sentences,
-        include_notes=not args.no_notes,
-        title_slide=not args.no_title_slide,
-    )
-
-    if from_url:
+    if from_scenario:
         try:
-            article = _fetch(args, output)
-        except NoteError as exc:
+            deck = _load_scenario(args, style)
+        except ScenarioError as exc:
             print(str(exc), file=sys.stderr)
-            return EXIT_FETCH_FAILED
+            return EXIT_USAGE
     else:
-        article = parse_article_file(args.input)
-
-    deck = plan_deck(article, style=style, options=options)
+        options = PlannerOptions(
+            deck_title=args.title,
+            split_sentences=not args.no_split_sentences,
+            include_notes=not args.no_notes,
+            title_slide=not args.no_title_slide,
+        )
+        if from_url:
+            try:
+                article = _fetch(args, output)
+            except NoteError as exc:
+                print(str(exc), file=sys.stderr)
+                return EXIT_FETCH_FAILED
+        else:
+            article = parse_article_file(args.input)
+        deck = plan_deck(article, style=style, options=options)
 
     output_dir = os.path.dirname(os.path.abspath(output))
     os.makedirs(output_dir, exist_ok=True)
@@ -153,6 +204,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not args.quiet:
         print(f"{len(deck.slides)} 枚のスライドを生成しました: {output}")
     return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# 教材シナリオ
+# ---------------------------------------------------------------------------
+
+
+def _load_scenario(args, style: Style) -> Deck:
+    """教材シナリオを、書かれたとおりのスライド構成にする。"""
+    scenario = scenario_mod.read_scenario(args.input)
+    deck = scenario_mod.build_deck(scenario, style=style, deck_title=args.title)
+    if not args.quiet:
+        narrated = sum(1 for slide in scenario.slides if slide.narration.strip())
+        print(f"教材シナリオを読み込みました: {scenario.title}")
+        print(f"  {scenario.count} 画面 / ナレーションのある画面 {narrated} 枚")
+    return deck
 
 
 # ---------------------------------------------------------------------------

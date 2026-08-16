@@ -11,7 +11,7 @@ import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from . import metrics
+from .layout import bullet_height
 from .model import (
     BULLET,
     KIND_BULLETS,
@@ -315,11 +315,11 @@ class _Planner:
         page: List[Bullet] = []
         used = 0.0
         for bullet in bullets:
-            height = self._bullet_height(bullet, first=not page)
+            height = bullet_height(bullet, self.style, first=not page)
             if page and used + height > limit:
                 pages.append(page)
                 page = []
-                used = self._bullet_height(bullet, first=True)
+                used = bullet_height(bullet, self.style, first=True)
                 page.append(bullet)
                 continue
             page.append(bullet)
@@ -327,15 +327,6 @@ class _Planner:
         if page:
             pages.append(page)
         return pages
-
-    def _bullet_height(self, bullet: Bullet, first: bool) -> float:
-        size = self.style.body_size(bullet.level)
-        avail = self.style.body_width_pt - self.style.bullet_indent_pt(bullet.level)
-        lines = metrics.line_count(bullet.text, size, avail)
-        height = lines * self.style.line_height_pt(size)
-        if not first:
-            height += self.style.space_before_pt
-        return height
 
     def _next_title(self) -> str:
         """同じ見出しで複数スライドになる場合に「続き」を付ける。"""

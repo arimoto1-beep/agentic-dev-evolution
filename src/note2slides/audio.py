@@ -28,6 +28,9 @@
 全体を 1 本の動画として測り、同じ補正値をかける(`waveform.py`)。
 
 読み上げる文章が無いスライドも、番号がずれないように無音の WAV を書き出す。
+長さは既定で `AudioOptions.silent_duration` だが、原稿に画面を見せる時間
+(`NarrationSegment.hold`)が書かれていればその長さにする。教材シナリオで
+「ここは読み上げず、何秒か見せる」と指定した画面がこれにあたる。
 形式は全ファイルで揃える(動画生成でつなぐときに揃っている必要がある)。
 """
 
@@ -420,12 +423,15 @@ def _assemble(
                 )
             )
         else:
-            wave_mod.write_wav(path, wave_mod.silence(options.silent_duration, rate))
+            # 読み上げる文章が無いスライド。原稿に画面を見せる時間(hold)が
+            # 書かれていればその長さ、無ければ既定の長さだけ映す。
+            duration = segment.hold if segment.hold > 0 else options.silent_duration
+            wave_mod.write_wav(path, wave_mod.silence(duration, rate))
             clips.append(
                 NarrationClip(
                     index=segment.index,
                     path=os.path.abspath(path),
-                    duration=options.silent_duration,
+                    duration=duration,
                     text=segment.text,
                     source=segment.source,
                     silent=True,

@@ -196,6 +196,31 @@ def test_silent_slide_still_gets_a_file(tmp_path):
     assert not result.clips[0].silent
 
 
+def test_a_silent_slide_is_shown_for_the_time_the_script_asks_for(tmp_path):
+    """読み上げない画面でも、原稿に見る時間があればその長さだけ映す。"""
+    path = tmp_path / "script.json"
+    path.write_text(
+        json.dumps(
+            {
+                "segments": [
+                    {"index": 1, "text": "読み上げます。"},
+                    {"index": 2, "text": "", "hold": 4.0},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = export_narration(
+        str(path), str(tmp_path / "audio"), AudioOptions(silent_duration=2.0), engine=FakeEngine()
+    )
+
+    assert result.clips[1].silent
+    assert result.clips[1].duration == 4.0
+    assert duration_of(tmp_path / "audio" / "narration_002.wav") == 4.0
+
+
 def test_all_files_share_one_format(tmp_path):
     source = make_script(tmp_path, ["読み上げ", "", "読み上げ 2"])
     outdir = tmp_path / "audio"

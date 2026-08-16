@@ -112,10 +112,17 @@ KIND_BULLETS = "bullets"
 KIND_CODE = "code"
 KIND_TABLE = "table"
 KIND_IMAGE = "image"
+#: 1 枚に複数の中身を縦に並べた画面(文章と図、表と補足文など)。中身は
+#: `Slide.parts` に書かれた順で入る。教材シナリオだけが作る(記事入力は
+#: 1 枚 = 1 つの中身のまま)。
+KIND_CONTENT = "content"
 
 BULLET = "bullet"
 NUMBER = "number"
 QUOTE = "quote"
+#: 記号を付けずに置く行。教材シナリオで、箇条書きではなく説明の文として
+#: 書かれた段落に使う(記事入力では、段落も文ごとの箇条書きになる)。
+PLAIN = "plain"
 
 
 @dataclass
@@ -133,10 +140,16 @@ class Bullet:
 
 
 @dataclass
-class Slide:
+class Content:
+    """画面に出す 1 つの中身。kind で、どのフィールドを使うかが決まる。
+
+    1 枚に 1 つだけ置く場合は `Slide` がそのまま中身になり、複数を並べる場合は
+    `Slide.parts` に並ぶ(`Slide` はこの `Content` に見出しとナレーションを
+    足したもの)。描画側は中身の種類ごとに描くだけなので、1 枚に 1 つでも
+    複数でも同じ処理で扱える。
+    """
+
     kind: str
-    title: str = ""
-    subtitle: str = ""
     bullets: List[Bullet] = field(default_factory=list)
     code: str = ""
     code_lang: str = ""
@@ -144,16 +157,10 @@ class Slide:
     table_rows: List[List[str]] = field(default_factory=list)
     image_path: Optional[str] = None
     image_alt: str = ""
-    notes: str = ""
-    #: 直前のスライドから続いている表・コード(1 枚に収まらず分けたもの)。
-    #: ナレーションで「表の続きです」と案内するために使う。
-    continued: bool = False
 
-    def to_dict(self) -> dict:
-        """--dump-plan 用。スライド構成の確認・差分比較に使う。"""
-        data = {"kind": self.kind, "title": self.title}
-        if self.subtitle:
-            data["subtitle"] = self.subtitle
+    def content_dict(self) -> dict:
+        """中身のフィールドだけを辞書にする(種類・見出しは含めない)。"""
+        data: dict = {}
         if self.bullets:
             data["bullets"] = [
                 {"level": b.level, "kind": b.kind, "text": b.text} for b in self.bullets
@@ -165,6 +172,46 @@ class Slide:
             data["table"] = {"header": self.table_header, "rows": self.table_rows}
         if self.image_path:
             data["image"] = {"path": self.image_path, "alt": self.image_alt}
+        return data
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, **self.content_dict()}
+
+    def as_slide(self, title: str = "", notes: str = "") -> "Slide":
+        """この中身だけを置いた 1 枚にする。"""
+        return Slide(
+            kind=self.kind,
+            title=title,
+            bullets=self.bullets,
+            code=self.code,
+            code_lang=self.code_lang,
+            table_header=self.table_header,
+            table_rows=self.table_rows,
+            image_path=self.image_path,
+            image_alt=self.image_alt,
+            notes=notes,
+        )
+
+
+@dataclass
+class Slide(Content):
+    title: str = ""
+    subtitle: str = ""
+    notes: str = ""
+    #: 1 枚に並べる中身(`KIND_CONTENT` のときだけ入る)。書かれた順に縦へ並ぶ。
+    parts: List[Content] = field(default_factory=list)
+    #: 直前のスライドから続いている表・コード(1 枚に収まらず分けたもの)。
+    #: ナレーションで「表の続きです」と案内するために使う。
+    continued: bool = False
+
+    def to_dict(self) -> dict:
+        """--dump-plan 用。スライド構成の確認・差分比較に使う。"""
+        data = {"kind": self.kind, "title": self.title}
+        if self.subtitle:
+            data["subtitle"] = self.subtitle
+        data.update(self.content_dict())
+        if self.parts:
+            data["parts"] = [part.to_dict() for part in self.parts]
         if self.continued:
             data["continued"] = True
         if self.notes:

@@ -15,7 +15,9 @@ from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 from pptx.oxml.ns import qn
 from pptx.util import Emu, Inches, Pt
 
+from . import layout as layout_mod
 from . import metrics, oxml_utils
+from .layout import Box
 from .model import (
     KIND_CODE,
     KIND_IMAGE,
@@ -23,10 +25,12 @@ from .model import (
     KIND_TABLE,
     KIND_TITLE,
     NUMBER,
+    PLAIN,
     QUOTE,
     SHAPE_CODE,
     SHAPE_TABLE,
     Bullet,
+    Content,
     Deck,
     Run,
     Slide,
@@ -70,14 +74,12 @@ class Renderer:
         else:
             pptx_slide = prs.slides.add_slide(prs.slide_layouts[_LAYOUT_TITLE_ONLY])
             self._draw_slide_title(pptx_slide, slide.title)
-            if slide.kind == KIND_CODE:
-                self._draw_code(pptx_slide, slide)
-            elif slide.kind == KIND_TABLE:
-                self._draw_table(pptx_slide, slide)
-            elif slide.kind == KIND_IMAGE:
-                self._draw_image(pptx_slide, slide)
-            else:
-                self._draw_bullets(pptx_slide, slide.bullets)
+            # 1 枚に 1 つでも複数でも、置き場所の決め方は同じ(`layout.fit`)。
+            # スライド自身が中身を持つ場合は、1 つだけ並べたものとして扱う。
+            parts = slide.parts or [slide]
+            placed = layout_mod.fit(parts, self.style, layout_mod.body_box(self.style))
+            for part in placed.parts:
+                self._draw_content(pptx_slide, part.content, part.box, slide.continued)
 
         if slide.notes:
             pptx_slide.notes_slide.notes_text_frame.text = slide.notes
@@ -169,22 +171,29 @@ class Renderer:
         _paint(rule, style.color_accent)
 
     # -- 本文 -----------------------------------------------------------
-    def _draw_bullets(self, pptx_slide, bullets: List[Bullet]) -> None:
+    def _draw_content(self, pptx_slide, content: Content, box: Box, continued: bool) -> None:
+        """画面に置く 1 つの中身を、渡された場所に描く。"""
+        if content.kind == KIND_CODE:
+            self._draw_code(pptx_slide, content, box, continued)
+        elif content.kind == KIND_TABLE:
+            self._draw_table(pptx_slide, content, box, continued)
+        elif content.kind == KIND_IMAGE:
+            self._draw_image(pptx_slide, content, box)
+        else:
+            self._draw_bullets(pptx_slide, content.bullets, box)
+
+    def _draw_bullets(self, pptx_slide, bullets: List[Bullet], box: Box) -> None:
         if not bullets:
             return
         style = self.style
-        box = pptx_slide.shapes.add_textbox(
-            Inches(style.body_left),
-            Inches(style.body_top),
-            Inches(style.body_width),
-            Inches(style.body_height),
+        shape = pptx_slide.shapes.add_textbox(
+            Inches(box.left), Inches(box.top), Inches(box.width), Inches(box.height)
         )
-        frame = box.text_frame
+        frame = shape.text_frame
         frame.word_wrap = True
         frame.vertical_anchor = MSO_ANCHOR.TOP
         _zero_insets(frame)
 
-        used = 0.0
         for index, bullet in enumerate(bullets):
             paragraph = frame.paragraphs[0] if index == 0 else frame.add_paragraph()
             size = style.body_size(bullet.level)
@@ -193,17 +202,19 @@ class Renderer:
             if index > 0:
                 paragraph.space_before = Pt(style.space_before_pt)
             self._apply_bullet(paragraph, bullet)
-            avail = style.body_width_pt - style.bullet_indent_pt(bullet.level)
-            used += metrics.line_count(bullet.text, size, avail) * style.line_height_pt(size)
-            if index > 0:
-                used += style.space_before_pt
 
-        if used > style.body_height_pt:
-            scale = max(0.6, style.body_height_pt / used)
+        used = layout_mod.bullets_height(bullets, style, box.width_pt)
+        if used > box.height_pt:
+            scale = max(0.6, box.height_pt / used)
             oxml_utils.set_normal_autofit(frame, scale, line_reduction=0.1 * (1 - scale))
 
     def _apply_bullet(self, paragraph, bullet: Bullet) -> None:
         style = self.style
+        if bullet.kind == PLAIN:
+            # 記号を付けない行。ぶら下げも作らず、左端から書き出す。
+            oxml_utils.set_indent(paragraph, Inches(style.indent_per_level * bullet.level), 0)
+            oxml_utils.set_no_bullet(paragraph)
+            return
         indent = Inches(style.indent_per_level * (bullet.level + 1))
         hanging = Inches(style.indent_per_level)
         oxml_utils.set_indent(paragraph, indent, hanging)
@@ -216,23 +227,22 @@ class Renderer:
             char = _BULLET_CHARS.get(bullet.level, "・")
             oxml_utils.set_char_bullet(paragraph, char, font="Arial", color=accent)
 
-    def _draw_code(self, pptx_slide, slide: Slide) -> None:
+    def _draw_code(self, pptx_slide, content: Content, box: Box, continued: bool) -> None:
         style = self.style
-        lines = slide.code.split("\n")
-        line_height = style.line_height_pt(style.code_size, style.code_line_spacing)
-        height = min(style.body_height, max(0.8, (len(lines) * line_height) / 72.0 + 0.4))
-        box = pptx_slide.shapes.add_shape(
+        lines = content.code.split("\n")
+        height = min(box.height, layout_mod.content_height(content, style, box.width))
+        shape = pptx_slide.shapes.add_shape(
             MSO_SHAPE.ROUNDED_RECTANGLE,
-            Inches(style.body_left),
-            Inches(style.body_top),
-            Inches(style.body_width),
+            Inches(box.left),
+            Inches(box.top),
+            Inches(box.width),
             Inches(height),
         )
         # ナレーション生成がコードをそのまま読み上げず、画面の案内文にできるよう、
         # 図形の名前に種類を残す(model.shape_name)。
-        box.name = shape_name(SHAPE_CODE, slide.continued, slide.code_lang)
-        _paint(box, style.color_code_bg)
-        frame = box.text_frame
+        shape.name = shape_name(SHAPE_CODE, continued, content.code_lang)
+        _paint(shape, style.color_code_bg)
+        frame = shape.text_frame
         frame.word_wrap = False
         frame.vertical_anchor = MSO_ANCHOR.TOP
         frame.margin_left = Inches(0.22)
@@ -252,29 +262,29 @@ class Renderer:
             oxml_utils.set_run_fonts(run, style.font_mono, style.font_mono)
 
         widest = max((metrics.text_width_em(line) for line in lines), default=0)
-        avail_pt = style.body_width_pt - 40
+        avail_pt = box.width_pt - 40
         if widest * style.code_size > avail_pt:
             scale = max(0.55, avail_pt / (widest * style.code_size))
             oxml_utils.set_normal_autofit(frame, scale)
 
-    def _draw_table(self, pptx_slide, slide: Slide) -> None:
+    def _draw_table(self, pptx_slide, content: Content, box: Box, continued: bool) -> None:
         style = self.style
-        header = slide.table_header
-        rows = slide.table_rows
+        header = content.table_header
+        rows = content.table_rows
         n_cols = max([len(header)] + [len(r) for r in rows]) or 1
         n_rows = (1 if header else 0) + len(rows)
         if n_rows == 0:
             return
-        height = min(style.body_height, 0.45 * n_rows + 0.2)
+        height = min(box.height, layout_mod.content_height(content, style, box.width))
         shape = pptx_slide.shapes.add_table(
             n_rows,
             n_cols,
-            Inches(style.body_left),
-            Inches(style.body_top),
-            Inches(style.body_width),
+            Inches(box.left),
+            Inches(box.top),
+            Inches(box.width),
             Inches(height),
         )
-        shape.name = shape_name(SHAPE_TABLE, slide.continued)
+        shape.name = shape_name(SHAPE_TABLE, continued)
         table = shape.table
         table.first_row = bool(header)
 
@@ -295,27 +305,27 @@ class Renderer:
                 cell.margin_left = Inches(0.1)
                 cell.margin_right = Inches(0.1)
 
-    def _draw_image(self, pptx_slide, slide: Slide) -> None:
+    def _draw_image(self, pptx_slide, content: Content, box: Box) -> None:
         style = self.style
-        caption_space = 0.45 if slide.image_alt else 0.0
-        max_w = Inches(style.body_width)
-        max_h = Inches(style.body_height - caption_space)
-        picture = pptx_slide.shapes.add_picture(slide.image_path, 0, 0, width=max_w)
+        caption_space = layout_mod.caption_height() if content.image_alt else 0.0
+        max_w = Inches(box.width)
+        max_h = Inches(max(0.1, box.height - caption_space))
+        picture = pptx_slide.shapes.add_picture(content.image_path, 0, 0, width=max_w)
         if picture.height > max_h:
             ratio = max_h / picture.height
             picture.height = int(picture.height * ratio)
             picture.width = int(picture.width * ratio)
-        picture.left = int((SLIDE_WIDTH_EMU - picture.width) / 2)
-        picture.top = Inches(style.body_top)
+        picture.left = int(Inches(box.left) + (Inches(box.width) - picture.width) / 2)
+        picture.top = Inches(box.top)
 
-        if slide.image_alt:
+        if content.image_alt:
             top = picture.top + picture.height + Inches(0.1)
-            box = pptx_slide.shapes.add_textbox(
-                Inches(style.body_left), top, Inches(style.body_width), Inches(0.35)
+            caption = pptx_slide.shapes.add_textbox(
+                Inches(box.left), top, Inches(box.width), Inches(0.35)
             )
             self._fill_text(
-                box.text_frame,
-                [[Run(slide.image_alt)]],
+                caption.text_frame,
+                [[Run(content.image_alt)]],
                 size=style.caption_size,
                 color=style.color_muted,
                 align=PP_ALIGN.CENTER,

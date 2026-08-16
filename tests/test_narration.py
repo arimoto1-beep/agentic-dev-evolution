@@ -265,6 +265,82 @@ def test_slide_without_text_becomes_silent(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# ノートの指示行(読み上げないこと・画面を見せる時間)
+# ---------------------------------------------------------------------------
+
+
+def test_notes_can_ask_for_time_to_look_at_the_screen(tmp_path):
+    notes = narration.compose_notes("図の説明です。", hold=2.5)
+    path = make_pptx(tmp_path, [bullets("画面の文字", title="見出し", notes=notes)])
+
+    segment = extract_script(path).segments[0]
+
+    assert segment.source == narration.SOURCE_NOTES
+    assert segment.text == "図の説明です。"  # 指示行は読み上げに入らない
+    assert segment.hold == 2.5
+
+
+def test_a_slide_marked_as_not_narrated_stays_silent(tmp_path):
+    """読まないと決めた画面で、画面の文字を代わりに読み上げないこと。"""
+    path = make_pptx(
+        tmp_path,
+        [bullets("画面の文字", title="見出し", notes=narration.compose_notes("", hold=4))],
+    )
+
+    segment = extract_script(path).segments[0]
+
+    assert segment.source == narration.SOURCE_NONE
+    assert segment.is_empty
+    assert segment.hold == 4
+
+
+def test_a_note_without_a_directive_line_is_read_as_written(tmp_path):
+    path = make_pptx(tmp_path, [bullets("画面", title="見出し", notes="ふつうのノートです。")])
+
+    segment = extract_script(path).segments[0]
+
+    assert segment.source == narration.SOURCE_NOTES
+    assert segment.hold == 0
+
+
+def test_composing_notes_only_adds_a_line_when_needed():
+    assert narration.compose_notes("読み上げる文章。") == "読み上げる文章。"
+    assert narration.compose_notes("読み上げる文章。", hold=3) == (
+        "読み上げる文章。\n[note2slides] hold=3"
+    )
+    assert narration.compose_notes("") == "[note2slides] narration=none"
+
+
+def test_an_unknown_directive_says_what_can_be_written(tmp_path):
+    path = make_pptx(tmp_path, [bullets("画面", notes="文章。\n[note2slides] speed=2")])
+
+    with pytest.raises(NarrationError) as error:
+        extract_script(path)
+
+    assert "speed=2" in str(error.value)
+    assert "hold" in str(error.value)
+
+
+def test_a_directive_narration_can_only_say_none(tmp_path):
+    """読み上げる文章は本文に書くもので、指示行には書けない。"""
+    path = make_pptx(tmp_path, [bullets("画面", notes="[note2slides] narration=あとで")])
+
+    with pytest.raises(NarrationError) as error:
+        extract_script(path)
+
+    assert "narration" in str(error.value)
+
+
+def test_a_directive_hold_must_be_a_number(tmp_path):
+    path = make_pptx(tmp_path, [bullets("画面", notes="文章。\n[note2slides] hold=ゆっくり")])
+
+    with pytest.raises(NarrationError) as error:
+        extract_script(path)
+
+    assert "hold" in str(error.value)
+
+
+# ---------------------------------------------------------------------------
 # スライドとの対応
 # ---------------------------------------------------------------------------
 

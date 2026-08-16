@@ -167,6 +167,42 @@ def test_image_is_embedded(tmp_path):
     assert picture.top + picture.height <= SLIDE_HEIGHT_EMU
 
 
+def test_one_screen_can_hold_text_and_a_figure(tmp_path):
+    """教材シナリオの「1 画面に複数の中身」が、重ならずに縦へ並ぶこと。"""
+    from PIL import Image as PILImage
+
+    from note2slides.scenario import build_deck, parse_scenario
+    from note2slides.style import Style
+
+    PILImage.new("RGB", (1600, 560), (220, 220, 220)).save(tmp_path / "figure.png")
+    text = (
+        "---\ntype: scenario\ntitle: 図と文\n---\n\n"
+        "## 図の画面\n\n### 画面\n図の見方を説明します。\n\n![流れの図](figure.png)\n\n"
+        "### ナレーション\n図の左から順に見ていきます。\n"
+    )
+    deck = build_deck(parse_scenario(text, source_path=str(tmp_path / "lesson.md")))
+    out = tmp_path / "lesson.pptx"
+    render_deck(deck, str(out))
+
+    prs = Presentation(str(out))
+    slide = prs.slides[0]
+    style = Style()
+    body_top = int(style.body_top * 914400)
+    body_bottom = int((style.body_top + style.body_height) * 914400)
+
+    picture = next(sh for sh in slide.shapes if sh.shape_type == MSO_SHAPE_TYPE.PICTURE)
+    body = next(
+        sh
+        for sh in slide.shapes
+        if sh.has_text_frame and sh.text_frame.text.startswith("図の見方")
+    )
+    assert body.top >= body_top
+    assert body.top + body.height <= picture.top  # 文が先、図があと(書いた順)
+    assert picture.top + picture.height <= body_bottom
+    assert slide.notes_slide.notes_text_frame.text == "図の左から順に見ていきます。"
+    assert not deck.warnings
+
+
 def test_line_break_inside_a_paragraph_is_a_real_break(tmp_path):
     """記事の中の改行は、段落を分けずに行だけを変える(`<a:br/>`)。
 

@@ -19,6 +19,11 @@
 進んでしまうため、画面に出ている文字だけを使って案内文を組み立てる
 (組み立て方は `guidance.py`)。ここでも記事に無い事実は足さない。
 
+読み上げる内容が資料を作る前から決まっている場合(教材シナリオ →
+`scenario.py`)は、ノートに指示行(`[note2slides] ...`)が入る。この行がある
+ノートは書いた人の指定として扱い、文章が無ければ画面の案内文を組み立てずに
+無音のままにする。
+
 原稿は JSON として書き出し・読み込みできる。読みを直したい場合は書き出した
 JSON を編集して、それを入力にして合成する。
 """
@@ -28,7 +33,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from . import guidance
 from .model import SHAPE_CODE, parse_shape_name
@@ -46,6 +51,22 @@ CONTINUATION_SUFFIX = "（続き）"
 
 SCRIPT_SUFFIXES = (".json",)
 PRESENTATION_SUFFIXES = (".pptx",)
+
+#: 発表者ノートに残す指示行の目印。
+#:
+#: ノートは「そのスライドで読み上げる文章」なので、文章では表せない指定
+#: (読み上げないこと・読み終わったあとに画面を見せる時間)だけをこの行に書く。
+#: 教材シナリオ(`scenario.py`)が書き込み、ここで読み取る。資料を PowerPoint で
+#: 開いて直接書き足すこともできる。
+#:
+#:     [note2slides] hold=3
+#:     [note2slides] narration=none hold=4
+#:
+#: この行があるノートは「読み上げる内容が決まっている」ものとして扱い、
+#: 文章が空なら、画面の案内文を組み立てずに無音のままにする。
+DIRECTIVE_PREFIX = "[note2slides]"
+#: 読み上げないことを明示する値。
+NARRATION_NONE = "none"
 
 
 class NarrationError(RuntimeError):
@@ -240,7 +261,18 @@ def _segment_of(slide, number: int) -> NarrationSegment:
     """1 枚分のセリフを決める。ノートが無い場合は画面に出ているものを説明する。"""
     title = _clean(_title_text(slide))
     spoken_title = _spoken_title(title)
-    notes = _clean(_notes_text(slide))
+    body, directives = split_directives(_notes_text(slide), index=number)
+    notes = _clean(body)
+    if directives is not None:
+        # 読み上げる内容が決まっているノート。文章が無い場合は、画面の案内文を
+        # 組み立てずに無音のままにする(書いた人が「ここは読まない」と決めている)。
+        return NarrationSegment(
+            number,
+            text=notes,
+            title=title,
+            source=SOURCE_NOTES if notes else SOURCE_NONE,
+            hold=directives.hold,
+        )
     if notes:
         return NarrationSegment(number, text=notes, title=title, source=SOURCE_NOTES)
 
@@ -262,6 +294,89 @@ def _segment_of(slide, number: int) -> NarrationSegment:
             number, text=_base_title(title), title=title, source=SOURCE_TITLE
         )
     return NarrationSegment(number, text="", title=title, source=SOURCE_NONE)
+
+
+# ---------------------------------------------------------------------------
+# 発表者ノートの指示行
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Directives:
+    """ノートに書かれた、文章では表せない指定。"""
+
+    hold: float = 0.0
+    narration: str = ""
+
+
+def compose_notes(text: str, hold: float = 0.0) -> str:
+    """ナレーションを発表者ノートの文字列にする(指示が要る場合だけ行を足す)。"""
+    body = (text or "").strip()
+    parts = []
+    if not body:
+        parts.append(f"narration={NARRATION_NONE}")
+    if hold:
+        parts.append(f"hold={hold:g}")
+    if not parts:
+        return body
+    line = " ".join([DIRECTIVE_PREFIX] + parts)
+    return f"{body}\n{line}" if body else line
+
+
+def split_directives(text: str, index: int = 0) -> Tuple[str, Optional[Directives]]:
+    """ノートを「読み上げる文章」と「指示」に分ける。
+
+    指示行が 1 行も無い場合は `None` を返す(記事から作った資料や、人が書いた
+    ノートはこちらになる)。
+    """
+    normalized = (text or "").replace("\v", "\n").replace("\r\n", "\n").replace("\r", "\n")
+    body: List[str] = []
+    found = False
+    hold = 0.0
+    narration = ""
+    for raw in normalized.split("\n"):
+        line = raw.strip()
+        if not line.lower().startswith(DIRECTIVE_PREFIX):
+            body.append(raw)
+            continue
+        found = True
+        for token in line[len(DIRECTIVE_PREFIX) :].split():
+            key, _, value = token.partition("=")
+            key = key.strip().lower()
+            if key == "hold":
+                hold = _directive_seconds(value, index, line)
+            elif key == "narration":
+                narration = _directive_narration(value, index, line)
+            else:
+                raise NarrationError(
+                    f"スライド {index} のノートに知らない指示があります: {token}\n"
+                    f"  {line}\n"
+                    "  書けるのは narration=none と hold=<秒> です。"
+                )
+    return "\n".join(body), (Directives(hold=hold, narration=narration) if found else None)
+
+
+def _directive_narration(value: str, index: int, line: str) -> str:
+    narration = value.strip().lower()
+    if narration != NARRATION_NONE:
+        raise NarrationError(
+            f"スライド {index} のノートの narration に書けるのは"
+            f" {NARRATION_NONE} だけです: {value!r}\n  {line}\n"
+            "  読み上げる文章は、この行ではなくノートの本文に書いてください。"
+        )
+    return narration
+
+
+def _directive_seconds(value: str, index: int, line: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise NarrationError(
+            f"スライド {index} のノートの hold が秒数ではありません: {value!r}\n  {line}"
+        ) from None
+    if seconds < 0:
+        raise NarrationError(f"スライド {index} のノートの hold は 0 以上にしてください: {seconds}")
+    return seconds
 
 
 def _screen_guidance(slide) -> Tuple[List[str], float]:
