@@ -123,9 +123,15 @@ class NarrationClip:
     duration: float
     text: str = ""  # 原稿の文章(元の記事の文言のまま)
     reading: str = ""  # 実際に合成へ渡した文字列
+    title: str = ""  # スライドの見出し(章立てに使う)
     source: str = narration_mod.SOURCE_NONE
     silent: bool = False
     utterances: int = 0  # いくつに分けて読み上げたか
+    # 読み上げ単位と間、前後の無音。字幕はこれと音声の長さから、どの文章が
+    # 何秒目にあたるかを割り出す(`captions.py`)。
+    pieces: List[SpeechPiece] = field(default_factory=list)
+    lead_silence: float = 0.0
+    tail_silence: float = 0.0
     lufs: Optional[float] = None  # このファイルの音量(補正後)
     notes: List[str] = field(default_factory=list)  # 読み上げ用に整形した内容
 
@@ -141,9 +147,17 @@ class NarrationClip:
             "source": self.source,
             "silent": self.silent,
             "utterances": self.utterances,
+            "title": self.title,
             "text": self.text,
             "reading": self.reading,
         }
+        if self.pieces:
+            data["lead_silence"] = round(self.lead_silence, 3)
+            data["tail_silence"] = round(self.tail_silence, 3)
+            data["pieces"] = [
+                {"text": piece.text, "pause_after": round(piece.pause_after, 3)}
+                for piece in self.pieces
+            ]
         if self.lufs is not None and self.lufs != -math.inf:
             data["lufs"] = round(self.lufs, 2)
         if self.notes:
@@ -416,8 +430,12 @@ def _assemble(
                     duration=audio.duration,
                     text=segment.text,
                     reading=plan.reading,
+                    title=segment.title,
                     source=segment.source,
                     utterances=len(plan.utterances),
+                    pieces=[SpeechPiece(u.text, u.pause_after) for u in plan.utterances],
+                    lead_silence=plan.lead_silence,
+                    tail_silence=plan.tail_silence,
                     lufs=wave_mod.loudness_lufs(audio),
                     notes=plan.notes,
                 )
@@ -433,6 +451,7 @@ def _assemble(
                     path=os.path.abspath(path),
                     duration=duration,
                     text=segment.text,
+                    title=segment.title,
                     source=segment.source,
                     silent=True,
                     notes=plan.notes,

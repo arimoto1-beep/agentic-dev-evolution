@@ -23,11 +23,13 @@ Deck(スライド構成)になるところまでが読み取り側の仕事で�
     tts / voicevox  : 読み上げ単位 -> 合成した音声
     waveform + audio: 音声     -> narration_001.wav ...(間と音量をそろえる)
     video           : 画像 + 音声 -> sample.mp4(ffmpeg)
+    captions        : 読み上げ単位 + 時間割り -> sample.srt / 章立て(概要欄用)
 
 画像と音声は同じ番号(スライド番号)で対応する。
 """
 
 from .audio import AudioOptions, NarrationClip, NarrationResult, export_narration
+from .captions import Chapter, CaptionStyle, Cue, build_chapters, build_cues
 from .markdown_reader import parse_article, parse_article_file
 from .model import Article, Deck, Slide
 from .narration import NarrationScript, NarrationSegment, extract_script
@@ -50,6 +52,9 @@ from .video import (
 __all__ = [
     "Article",
     "AudioOptions",
+    "CaptionStyle",
+    "Chapter",
+    "Cue",
     "Deck",
     "ExportResult",
     "ImageOptions",
@@ -70,6 +75,8 @@ __all__ = [
     "ThumbnailResult",
     "VideoOptions",
     "VideoResult",
+    "build_chapters",
+    "build_cues",
     "build_deck",
     "compose_video",
     "convert_file",

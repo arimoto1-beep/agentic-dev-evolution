@@ -570,6 +570,34 @@ def test_manifest_links_slides_and_audio(tmp_path):
     assert manifest["total_duration"] == pytest.approx(result.total_duration, abs=0.01)
 
 
+def test_manifest_keeps_the_reading_units_for_the_captions(tmp_path):
+    """字幕は、どの文章がどの順で読まれたかを一覧から読む(`captions.py`)。"""
+    source = make_script(tmp_path, ["最初の文章。\n次の行です。"])
+    outdir = tmp_path / "audio"
+
+    export_narration(source, str(outdir), engine=FakeEngine())
+
+    clip = manifest_of(outdir)["clips"][0]
+    assert clip["title"] == "見出し 1"
+    assert [piece["text"] for piece in clip["pieces"]] == ["最初の文章。", "次の行です。"]
+    assert clip["pieces"][0]["pause_after"] > 0  # 行の間
+    assert clip["pieces"][-1]["pause_after"] == 0  # 最後の間は tail_silence が持つ
+    assert clip["lead_silence"] > 0 and clip["tail_silence"] > 0
+    # 前後の無音と間を足すと、書き出した音声の長さと合う。
+    spoken = clip["duration"] - clip["lead_silence"] - clip["tail_silence"]
+    assert spoken > sum(piece["pause_after"] for piece in clip["pieces"])
+
+
+def test_a_silent_slide_has_no_reading_units(tmp_path):
+    source = make_script(tmp_path, [""])
+
+    export_narration(source, str(tmp_path / "audio"), engine=FakeEngine())
+
+    clip = manifest_of(tmp_path / "audio")["clips"][0]
+    assert clip["silent"] is True
+    assert "pieces" not in clip
+
+
 def test_script_can_be_dumped(tmp_path):
     source = make_pptx(tmp_path, ["本文です。"])
     script_path = tmp_path / "out" / "script.json"

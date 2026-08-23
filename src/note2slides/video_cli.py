@@ -20,6 +20,7 @@ from typing import List, Optional, Tuple
 from . import __version__
 from . import audio_cli, images_cli
 from . import audio as audio_mod
+from . import captions as captions_mod
 from . import ffmpeg as ffmpeg_mod
 from . import slide_images as images_mod
 from . import tts as tts_mod
@@ -184,6 +185,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     publish_group.add_argument(
         "--thumbnail-label", default="", help="サムネイルの左上に出す短い文字(例: 第23回)"
+    )
+    publish_group.add_argument(
+        "--captions",
+        choices=captions_mod.FORMATS,
+        default=captions_mod.FORMAT_SRT,
+        help=f"一緒に書き出す字幕の形式(既定: {captions_mod.FORMAT_SRT}、"
+        f"{captions_mod.FORMAT_NONE} で作らない)",
+    )
+    publish_group.add_argument(
+        "--caption-chars",
+        type=int,
+        default=captions_mod.CaptionStyle().line_chars,
+        help=f"字幕 1 行の文字数(既定: {captions_mod.CaptionStyle().line_chars})",
+    )
+    publish_group.add_argument(
+        "--no-chapters", action="store_true", help="概要欄に貼る章立てを書き出さない"
     )
 
     parser.add_argument("--quiet", action="store_true", help="進捗を表示しない")
@@ -403,6 +420,9 @@ def _video_options(args) -> VideoOptions:
         audio_bitrate=args.audio_bitrate,
         background=_color(args.background),
         min_duration=args.min_duration,
+        captions=args.captions,
+        caption_style=captions_mod.CaptionStyle(line_chars=args.caption_chars),
+        chapters=not args.no_chapters,
     )
 
 
@@ -484,6 +504,13 @@ def _report(result: VideoResult, options: VideoOptions, quiet: bool) -> None:
     print(f"  ファイルの大きさ: {_size(result.size_bytes)}")
     if result.manifest_path:
         print(f"  一覧: {os.path.basename(result.manifest_path)}(何秒目にどのスライドが出るか)")
+    for path in result.caption_paths:
+        print(f"  字幕: {os.path.basename(path)}({len(result.cues)} 個。投稿時に添える)")
+    if result.chapters_path:
+        print(
+            f"  章立て: {os.path.basename(result.chapters_path)}"
+            f"({len(result.chapters)} 章。概要欄の先頭に貼る)"
+        )
     if result.slides_dir:
         print(f"  素材: {result.slides_dir}")
     if result.audio_dir:

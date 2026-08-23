@@ -39,6 +39,7 @@ from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import audio as audio_mod
+from . import captions as captions_mod
 from . import ffmpeg as ffmpeg_mod
 from . import slide_images as images_mod
 from . import waveform as wave_mod
@@ -82,6 +83,12 @@ class VideoOptions:
     channels: int = 2  # 合成音声はモノラルだが、左右どちらでも同じに聞こえるようにする
     background: Tuple[int, int, int] = (255, 255, 255)
     min_duration: float = DEFAULT_MIN_DURATION
+    #: 一緒に書き出す字幕の形式(`captions.FORMATS`)。`none` で作らない。
+    captions: str = captions_mod.FORMAT_SRT
+    caption_style: captions_mod.CaptionStyle = field(
+        default_factory=captions_mod.CaptionStyle
+    )
+    chapters: bool = True  # 概要欄に貼る章立てを書き出すか
 
     def resolved_height(self) -> int:
         if self.height:
@@ -111,6 +118,21 @@ class VideoOptions:
             raise VideoError(f"標本化周波数が小さすぎます: {self.sample_rate}")
         if self.channels not in (1, 2):
             raise VideoError(f"音声のチャンネル数は 1 か 2 にしてください: {self.channels}")
+        if self.captions not in captions_mod.FORMATS:
+            known = " / ".join(captions_mod.FORMATS)
+            raise VideoError(f"字幕の形式は {known} から選んでください: {self.captions}")
+        try:
+            self.caption_style.validate()
+        except captions_mod.CaptionError as exc:
+            raise VideoError(str(exc)) from exc
+
+    def caption_formats(self) -> Tuple[str, ...]:
+        """書き出す字幕の形式。"""
+        if self.captions == captions_mod.FORMAT_NONE:
+            return ()
+        if self.captions == captions_mod.FORMAT_BOTH:
+            return (captions_mod.FORMAT_SRT, captions_mod.FORMAT_VTT)
+        return (self.captions,)
 
     def aspect_warning(self) -> Optional[str]:
         width, height = self.size()
@@ -172,6 +194,10 @@ class VideoResult:
     audio_dir: Optional[str] = None  # 同じくナレーション音声の場所
     command: List[str] = field(default_factory=list)
     credit: str = ""  # 公開時に表示が必要なクレジット表記
+    cues: List[captions_mod.Cue] = field(default_factory=list)  # 字幕
+    chapters: List[captions_mod.Chapter] = field(default_factory=list)  # 章立て
+    caption_paths: List[str] = field(default_factory=list)  # 書き出した字幕ファイル
+    chapters_path: Optional[str] = None
     manifest_path: Optional[str] = None
     workdir: Optional[str] = None  # 調査用に残した作業ディレクトリ
     warnings: List[str] = field(default_factory=list)
@@ -470,8 +496,69 @@ def compose_video(
             "ナレーションが途中で切れていないか確認してください。"
         )
 
+    _write_captions(result, options)
     result.manifest_path = _write_manifest(result, options, source_name)
     return result
+
+
+def _write_captions(result: VideoResult, options: VideoOptions) -> None:
+    """字幕と章立てを、動画と同じ場所に書き出す。
+
+    どちらも動画そのものには焼き込まない。YouTube では字幕を別ファイルで
+    渡すほうが、視聴者が表示を切り替えられて、あとから直すこともできる。
+
+    材料が無いとき(手で並べた素材など)は作らない。動画はもう書き出せている
+    ので、ここでの取りこぼしで失敗にはしない。
+    """
+    base = os.path.splitext(result.path)[0]
+    # 前回の字幕が残っていると、作り直した動画と食い違ったまま投稿してしまう。
+    for suffix in (captions_mod.SRT_SUFFIX, captions_mod.VTT_SUFFIX, captions_mod.CHAPTERS_SUFFIX):
+        if os.path.isfile(base + suffix):
+            os.remove(base + suffix)
+
+    formats = options.caption_formats()
+    if not formats and not options.chapters:
+        return
+
+    readings, warnings = captions_mod.load_captions(result.audio_dir)
+    result.warnings.extend(warnings)
+    if not readings:
+        return
+
+    slides = [
+        replace(
+            readings[segment.index],
+            start=segment.start,
+            duration=segment.narration or readings[segment.index].duration,
+        )
+        for segment in result.segments
+        if segment.index in readings
+    ]
+
+    if formats:
+        result.cues = captions_mod.build_cues(slides, options.caption_style)
+        if result.cues:
+            for fmt in formats:
+                suffix = (
+                    captions_mod.VTT_SUFFIX
+                    if fmt == captions_mod.FORMAT_VTT
+                    else captions_mod.SRT_SUFFIX
+                )
+                result.caption_paths.append(
+                    captions_mod.write_captions(result.cues, base + suffix, fmt)
+                )
+
+    if options.chapters:
+        result.chapters = captions_mod.build_chapters(slides, result.duration)
+        if result.chapters:
+            result.chapters_path = captions_mod.write_chapters(
+                result.chapters, base + captions_mod.CHAPTERS_SUFFIX
+            )
+            if len(result.chapters) < captions_mod.MIN_CHAPTERS:
+                result.warnings.append(
+                    f"章立てが {len(result.chapters)} 個しかありません。"
+                    f"YouTube は {captions_mod.MIN_CHAPTERS} 個以上ないと目次を表示しません。"
+                )
 
 
 def _encoded_duration(report: ffmpeg_mod.RunReport, options: VideoOptions) -> float:
@@ -722,6 +809,8 @@ def _write_manifest(result: VideoResult, options: VideoOptions, source_name: str
         },
         "credit": result.credit,
         "materials": {"slides": result.slides_dir, "audio": result.audio_dir},
+        "captions": [os.path.basename(path) for path in result.caption_paths],
+        "chapters": [chapter.to_dict() for chapter in result.chapters],
         "count": result.count,
         "slides": [segment.to_dict() for segment in result.segments],
         "command": format_command(result.command),

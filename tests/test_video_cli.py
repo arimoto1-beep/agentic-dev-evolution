@@ -182,12 +182,6 @@ def test_default_output_drops_the_materials_suffix():
 
 
 # ---------------------------------------------------------------------------
-# 環境の確認
-# ---------------------------------------------------------------------------
-
-
-@requires_ffmpeg
-# ---------------------------------------------------------------------------
 # 投稿用のサムネイル(--thumbnail)
 # ---------------------------------------------------------------------------
 
@@ -223,6 +217,129 @@ def test_thumbnail_is_written_next_to_the_video(tmp_path):
     assert os.path.isfile(str(tmp_path / "lesson_thumbnail.png"))
 
 
+# ---------------------------------------------------------------------------
+# 字幕と章立て
+# ---------------------------------------------------------------------------
+
+
+def write_narration(audio, entries):
+    """読み上げ単位まで入った音声の一覧(note2slides-audio が書き出す形)。"""
+    clips = [
+        {
+            "index": index,
+            "file": f"narration_{index:03d}.wav",
+            "duration": duration,
+            "title": title,
+            "reading": text,
+            "lead_silence": 0.0,
+            "tail_silence": 0.0,
+            "pieces": [{"text": text, "pause_after": 0.0}],
+        }
+        for index, (title, text, duration) in enumerate(entries, start=1)
+    ]
+    with open(os.path.join(audio, "narration.json"), "w", encoding="utf-8") as f:
+        json.dump({"clips": clips}, f, ensure_ascii=False)
+
+
+@requires_ffmpeg
+def test_captions_are_written_next_to_the_video(tmp_path):
+    slides, audio = make_materials(tmp_path, count=2, seconds=0.5)
+    write_narration(audio, [("はじめに", "最初の画面です。", 0.5), ("本題", "次の画面です。", 0.5)])
+    out = str(tmp_path / "movie.mp4")
+
+    code = video_cli.main(["--slides", slides, "--audio", audio, "-o", out, "--quiet", *SMALL])
+
+    assert code == video_cli.EXIT_OK
+    with open(tmp_path / "movie.srt", encoding="utf-8") as f:
+        srt = f.read()
+    assert "最初の画面です。" in srt and "次の画面です。" in srt
+    assert "00:00:00,000 --> 00:00:00,500" in srt
+    with open(tmp_path / "movie_video.json", encoding="utf-8") as f:
+        assert json.load(f)["captions"] == ["movie.srt"]
+
+
+@requires_ffmpeg
+def test_captions_can_be_written_as_webvtt(tmp_path):
+    slides, audio = make_materials(tmp_path)
+    write_narration(audio, [("はじめに", "最初の画面です。", 0.5), ("本題", "次の画面です。", 0.5)])
+    out = str(tmp_path / "movie.mp4")
+
+    args = ["--slides", slides, "--audio", audio, "-o", out, "--quiet", "--captions", "both"]
+    assert video_cli.main(args + SMALL) == video_cli.EXIT_OK
+
+    assert (tmp_path / "movie.srt").is_file()
+    with open(tmp_path / "movie.vtt", encoding="utf-8") as f:
+        assert f.read().startswith("WEBVTT")
+
+
+@requires_ffmpeg
+def test_captions_and_chapters_can_be_turned_off(tmp_path):
+    slides, audio = make_materials(tmp_path)
+    write_narration(audio, [("はじめに", "最初の画面です。", 0.5), ("本題", "次の画面です。", 0.5)])
+    out = str(tmp_path / "movie.mp4")
+
+    args = ["--slides", slides, "--audio", audio, "-o", out, "--quiet", *SMALL]
+    assert video_cli.main(args + ["--captions", "none", "--no-chapters"]) == video_cli.EXIT_OK
+
+    assert not (tmp_path / "movie.srt").exists()
+    assert not (tmp_path / "movie_chapters.txt").exists()
+
+
+@requires_ffmpeg
+def test_chapters_are_written_for_the_description(tmp_path, capsys):
+    slides, audio = make_materials(tmp_path, count=2, seconds=0.5)
+    write_narration(audio, [("はじめに", "最初の画面です。", 0.5), ("本題", "次の画面です。", 0.5)])
+    out = str(tmp_path / "movie.mp4")
+
+    video_cli.main(["--slides", slides, "--audio", audio, "-o", out, *SMALL])
+
+    with open(tmp_path / "movie_chapters.txt", encoding="utf-8") as f:
+        assert f.read() == "0:00 はじめに\n"
+    # 1 枚 0.5 秒なので、10 秒に満たない章は前にまとまる。数が足りないことは伝える。
+    assert "3 個以上" in capsys.readouterr().err
+
+
+@requires_ffmpeg
+def test_a_previous_caption_does_not_survive_a_rebuild(tmp_path):
+    """作り直した動画と食い違う字幕が残っていると、そのまま投稿してしまう。"""
+    slides, audio = make_materials(tmp_path)
+    write_narration(audio, [("はじめに", "最初の画面です。", 0.5), ("本題", "次の画面です。", 0.5)])
+    out = str(tmp_path / "movie.mp4")
+    args = ["--slides", slides, "--audio", audio, "-o", out, "--quiet", *SMALL]
+    assert video_cli.main(args) == video_cli.EXIT_OK
+    assert (tmp_path / "movie.srt").is_file()
+
+    assert video_cli.main(args + ["-f", "--captions", "none", "--no-chapters"]) == video_cli.EXIT_OK
+
+    assert not (tmp_path / "movie.srt").exists()
+    assert not (tmp_path / "movie_chapters.txt").exists()
+
+
+@requires_ffmpeg
+def test_materials_without_reading_units_still_make_a_video(tmp_path, capsys):
+    """古い形式の一覧でも動画は作る(字幕だけ作らないことを伝える)。"""
+    slides, audio = make_materials(tmp_path)
+    with open(os.path.join(audio, "narration.json"), "w", encoding="utf-8") as f:
+        clips = [
+            {"index": index, "file": f"narration_{index:03d}.wav", "reading": "こんにちは。"}
+            for index in (1, 2)
+        ]
+        json.dump({"clips": clips}, f, ensure_ascii=False)
+    out = str(tmp_path / "movie.mp4")
+
+    code = video_cli.main(["--slides", slides, "--audio", audio, "-o", out, *SMALL])
+
+    assert code == video_cli.EXIT_OK
+    assert not (tmp_path / "movie.srt").exists()
+    assert "note2slides-audio" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# 環境の確認
+# ---------------------------------------------------------------------------
+
+
+@requires_ffmpeg
 def test_check_reports_ffmpeg(capsys):
     assert video_cli._check_ffmpeg(None) is True
 
