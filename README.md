@@ -30,9 +30,11 @@ note記事を入力として、eラーニング形式のYouTube通常動画を�
 ```
 記事(.md) / 公開 note 記事の URL / 教材シナリオ(.md)
     --[note2slides]--> 資料(.pptx) --[note2slides-video]--> 動画(.mp4)
-                                        |
-                                        +--[note2slides-images]--> slide_001.png ...
-                                        +--[note2slides-audio]---> narration_001.wav ...
+    |                                   |
+    |                                   +--[note2slides-images]--> slide_001.png ...
+    |                                   +--[note2slides-audio]---> narration_001.wav ...
+    |
+    +--[note2slides-thumb]--> thumbnail.png(投稿に使う 1 枚絵)
 ```
 
 入力は 2 通りあります。**記事** を渡すと、記事の文章構造から動画の構成を組み立てます
@@ -92,6 +94,10 @@ VOICEVOX Nemo は VOICEVOX の「設定 > エンジン」から追加します(�
 # 資料 -> ナレーション音声
 .venv/Scripts/python.exe -m note2slides.audio_cli build/sample.pptx -o build/audio
 
+# 記事 / 教材シナリオ -> 投稿用のサムネイル画像
+.venv/Scripts/python.exe -m note2slides.thumbnail_cli samples/lesson_scenario.md \
+    -o build/lesson/thumbnail.png --label "第1回"
+
 # 記事 -> ナレーション音声の候補(聴き比べて標準の声を決めるため)
 .venv/Scripts/python.exe -m note2slides.voice_compare_cli samples/narration_sample.md -o build/voice_compare
 ```
@@ -103,6 +109,7 @@ VOICEVOX Nemo は VOICEVOX の「設定 > エンジン」から追加します(�
 | `-o, --output` | 出力先(既定は入力と同じ場所・同じ名前の .pptx) |
 | `-f, --force` | 出力先が既にある場合に上書きする |
 | `--title` | 表紙のタイトルを指定する |
+| `--theme` | スライドの見た目(`light` / `plain`。既定は `light`) |
 | `--no-split-sentences` | 段落を文単位に分けず、1 段落を 1 項目にする |
 | `--no-notes` | 発表者ノートに元の本文を入れない |
 | `--font-latin` / `--font-ea` / `--font-mono` | 欧文 / 日本語 / 等幅フォント |
@@ -120,6 +127,28 @@ URL を入力にする場合のオプション:
 | `--image-dir DIR` | 取り込んだ画像の置き場所(既定は出力と同じ場所の `<名前>_images`) |
 | `--dump-article PATH` | 取り込んだ記事を JSON で書き出す(本文の欠落・混入の確認用) |
 | `--fetch-timeout` / `--user-agent` | 取得の待ち時間(秒、既定 30)と User-Agent |
+
+### スライドの見た目
+
+見た目は `--theme` で選びます。既定は `light` です。
+
+| テーマ | 見た目 |
+| --- | --- |
+| `light` | 表紙は濃い地に白い文字、章扉はうすい地、本文は白地。本文には資料名とページ番号が入ります |
+| `plain` | 白地のみ・装飾なし(以前の見た目) |
+
+画面の役割ごとに地の色を変えているのは、動画にしたときに「表紙 → 章 → 本文」の
+切り替わりが分かるようにするためです。色や位置は `style.py` の `Theme` にまとまっています。
+
+**タイトルの改行** は、幅に入るところで機械的に切るのではなく、文節の切れ目を探して
+決めます(`text_wrap.py`)。「開発環境をゼロか / ら作り直す」のように語の途中で
+切れることを避け、行の長さもなるべくそろえます。行頭に `、` や `」` が来ないなどの
+禁則も見ます。
+
+```
+生成AIを前提とした開発環境を        <- 表紙(40pt)は 2 行に
+ゼロから作り直すための実践ガイド
+```
 
 ### 記事の書き方とスライドの対応
 
@@ -1000,6 +1029,57 @@ VOICEVOX Nemo からは 2 つだけ入れています。Nemo の声は人格を�
 終了コードは、成功 0 / 引数の誤り 2 / 出力先に既存 3 / 一部または全部の候補が失敗 4 /
 音声合成が使えない 5 です。
 
+## 投稿用サムネイル(note2slides-thumb)
+
+YouTube に投稿するとき、動画とは別にサムネイルの画像が要ります。資料と同じ描画・
+同じ見た目で 1 枚絵を作るコマンドです。
+
+```bash
+# 教材シナリオから(表紙の題と副題をそのまま使う)
+.venv/Scripts/python.exe -m note2slides.thumbnail_cli samples/lesson_scenario.md \
+    -o build/lesson/thumbnail.png --label "第1回"
+
+# 資料(.pptx)から
+.venv/Scripts/python.exe -m note2slides.thumbnail_cli build/lesson/lesson.pptx \
+    -o build/lesson/thumbnail.png
+
+# 入力を使わず、文字だけを指定する
+.venv/Scripts/python.exe -m note2slides.thumbnail_cli \
+    --title "教材シナリオから動画を作る" --subtitle "note2slides" -o build/thumbnail.png
+```
+
+出力は既定で 1280x720(YouTube が推奨する 16:9)の PNG です。作り方はスライド画像と
+同じで、1 枚だけの .pptx を PDF 経由で画像にするため、フォントの見え方も資料と同じに
+なります(LibreOffice が必要です)。
+
+題は、一覧で小さく表示されても読めるように、表紙より大きい文字にします。大きさは
+固定ではなく、**語の途中で切らずに 2 行に収まる、いちばん大きい文字** を選びます
+(2 行に収まらない場合だけ 3 行にします)。
+
+| オプション | 説明 |
+| --- | --- |
+| `-o, --output` | 出力先(既定は入力と同じ場所の `<名前>_thumbnail.png`) |
+| `--title` / `--subtitle` | 出す文字(既定は入力の表紙の題と副題) |
+| `--no-subtitle` | 副題を出さない |
+| `--label` | 左上に出す短い文字(例: `第23回`) |
+| `--width` | 横の画素数(既定 1280) |
+| `--format` | `png` / `jpg`(既定 png) |
+| `--theme` | 見た目(資料と同じものを指定します) |
+| `--keep-pptx` | 元にした 1 枚だけの .pptx も残す(PowerPoint で手直しする場合) |
+| `--soffice` | LibreOffice の場所 |
+
+サムネイルの文字は、動画の題と別にしたいことがあります(動画の題は説明的に、
+サムネイルは短く、など)。その場合は `--title` / `--subtitle` で上書きしてください。
+入力から取り出した文字を、こちらで言い換えたり要約したりはしません。
+
+動画と一緒に作る場合は、動画コマンドに `--thumbnail` を付けても構いません
+(資料から動画を作るときだけ使えます)。
+
+```bash
+.venv/Scripts/python.exe -m note2slides.video_cli build/lesson/lesson.pptx \
+    -o build/lesson/lesson.mp4 --thumbnail --thumbnail-label "第1回"
+```
+
 ## ナレーション付き動画(note2slides-video)
 
 資料から、スライドごとにナレーションが付いた動画(MP4)を作ります。
@@ -1077,6 +1157,8 @@ YouTube にそのまま投稿でき、一般的なプレイヤーでも再生で
 | `--min-duration` | 1 枚を映す最短の長さ(秒、既定 1.0) |
 | `--background` | 16:9 に足す余白の色(既定 `#ffffff`) |
 | `--engine` / `--voice` / `--speed` / `--dict` | 音声合成の指定(note2slides-audio と同じ) |
+| `--thumbnail [PATH]` | 投稿用のサムネイルも書き出す(既定は `<名前>_thumbnail.png`) |
+| `--thumbnail-label` | サムネイルの左上に出す短い文字(例: `第23回`) |
 | `--silence` | 読み上げる文章が無いスライドの長さ(秒、既定 2.0) |
 | `--no-loudness` | 音量の調整をしない |
 | `--audio-bitrate` | 動画の音声の符号化量(既定 192k) |

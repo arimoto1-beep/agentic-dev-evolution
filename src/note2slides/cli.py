@@ -34,7 +34,7 @@ from .note_source import NoteError
 from .planner import PlannerOptions, plan_deck
 from .renderer import render_deck
 from .scenario import ScenarioError
-from .style import Style
+from .style import DEFAULT_THEME, Style, get_theme, theme_names
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -79,6 +79,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--no-notes", action="store_true", help="発表者ノートに元の本文を入れない"
+    )
+    parser.add_argument(
+        "--theme",
+        default=DEFAULT_THEME,
+        choices=list(theme_names()),
+        help="スライドの見た目(既定: %(default)s。plain は装飾なしの白地)",
     )
     parser.add_argument("--font-latin", default=Style.font_latin, help="欧文フォント")
     parser.add_argument("--font-ea", default=Style.font_ea, help="日本語フォント")
@@ -163,6 +169,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return EXIT_EXISTS
 
     style = Style(
+        theme=get_theme(args.theme),
         font_latin=args.font_latin,
         font_ea=args.font_ea,
         font_mono=args.font_mono,

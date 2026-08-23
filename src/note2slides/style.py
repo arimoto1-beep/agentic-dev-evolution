@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
+
+RGB = Tuple[int, int, int]
 
 # 16:9 のスライドサイズ(EMU)。914400 EMU = 1 inch。
 SLIDE_WIDTH_EMU = 12192000  # 13.333 in
@@ -21,8 +23,90 @@ def inches_to_pt(inches: float) -> float:
     return inches * PT_PER_INCH
 
 
+
+@dataclass(frozen=True)
+class Theme:
+    """スライド全体の見た目(背景と、装飾に使う色)。
+
+    文字の大きさや位置は `Style` が持ち、ここには「地の見え方」だけを置く。
+    見た目を変えても、どこに何が入るかは変わらないようにするためである。
+
+    画面の役割ごとに地の色を変え、動画を見たときに切り替わりが分かるようにする。
+
+        表紙   濃い地に白い文字(動画の最初の 1 枚。区切りとして最も強い)
+        章扉   うすい地に濃い文字(章の変わり目)
+        本文   白い地(読むための画面。いちばん明るい)
+    """
+
+    name: str = "light"
+    #: 本文スライドの地の色。
+    background: RGB = (0xFF, 0xFF, 0xFF)
+    #: 表紙の地・文字。
+    cover_background: RGB = (0x14, 0x22, 0x3A)
+    cover_title: RGB = (0xFF, 0xFF, 0xFF)
+    cover_subtitle: RGB = (0xB3, 0xC1, 0xD6)
+    cover_accent: RGB = (0x4C, 0x9A, 0xE0)
+    #: 章扉の地・文字。
+    section_background: RGB = (0xEE, 0xF3, 0xF9)
+    section_title: RGB = (0x14, 0x22, 0x3A)
+    #: 見出しの下に引く、うすい罫線(短い濃い罫線と組みで使う)。
+    rule: RGB = (0xDA, 0xE0, 0xE8)
+    #: 見出しの下の、短い濃い罫線の長さ(inch)。0 なら、うすい罫線を引かずに
+    #: 見出しの幅いっぱいの濃い罫線にする(従来の見た目)。
+    accent_rule_width: float = 1.5
+    #: 下端に出す、資料名とページ番号。
+    footer: bool = True
+    footer_color: RGB = (0x93, 0x9D, 0xAB)
+    footer_size: float = 11.0
+    footer_top: float = 6.82
+    #: 表紙・章扉の地を塗るか。False なら本文と同じ地になる(従来の見た目)。
+    filled_cover: bool = False
+    #: 表紙の題の下端(inch)。罫線と副題はこの下に続く。地を塗る見た目では
+    #: 下端に帯が入るぶん、かたまりを少し上に置く。
+    cover_title_bottom: float = 3.55
+
+
+#: 名前で選べる見た目。`plain` は Run 022 までの見た目(白地・装飾なし)。
+THEMES: Dict[str, Theme] = {
+    "light": Theme(name="light", filled_cover=True),
+    "plain": Theme(
+        name="plain",
+        cover_background=(0xFF, 0xFF, 0xFF),
+        cover_title=(0x1F, 0x24, 0x2E),
+        cover_subtitle=(0x6B, 0x72, 0x80),
+        cover_accent=(0x1B, 0x6F, 0xB8),
+        cover_title_bottom=3.8,
+        section_background=(0xFF, 0xFF, 0xFF),
+        rule=(0xFF, 0xFF, 0xFF),
+        accent_rule_width=0.0,
+        footer=False,
+        filled_cover=False,
+    ),
+}
+
+DEFAULT_THEME = "light"
+
+
+def theme_names() -> Tuple[str, ...]:
+    return tuple(THEMES)
+
+
+def get_theme(name: Optional[str]) -> Theme:
+    """名前から見た目を選ぶ。知らない名前は既定に落とさず、その場で知らせる。"""
+    if not name:
+        return THEMES[DEFAULT_THEME]
+    try:
+        return THEMES[name]
+    except KeyError:
+        known = " / ".join(theme_names())
+        raise ValueError(f"知らない見た目です: {name}(選べるのは {known})") from None
+
+
 @dataclass
 class Style:
+    #: 全体の見た目(地の色と装飾)。
+    theme: Theme = field(default_factory=lambda: THEMES[DEFAULT_THEME])
+
     # フォント(欧文 / 日本語 / 等幅)
     font_latin: str = "Arial"
     font_ea: str = "Meiryo"

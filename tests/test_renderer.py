@@ -9,6 +9,7 @@ from pptx.oxml.ns import qn
 
 from note2slides import convert_file
 from note2slides.markdown_reader import parse_article
+from note2slides.model import SHAPE_FOOTER, parse_shape_name
 from note2slides.planner import PlannerOptions, plan_deck
 from note2slides.renderer import render_deck
 from note2slides.style import SLIDE_HEIGHT_EMU, SLIDE_WIDTH_EMU
@@ -115,9 +116,14 @@ def _normalize(text: str) -> str:
 
 
 def _text_units(prs):
-    """スライド上の文字列を、段落・セル単位で取り出す。"""
+    """スライド上の文字列を、段落・セル単位で取り出す。
+
+    資料名・ページ番号(フッタ)は、記事の内容ではなく資料の飾りなので外す。
+    """
     for slide in prs.slides:
         for shape in slide.shapes:
+            if parse_shape_name(shape.name)[0] == SHAPE_FOOTER:
+                continue
             if shape.has_text_frame:
                 for paragraph in shape.text_frame.paragraphs:
                     yield "".join(run.text for run in paragraph.runs)

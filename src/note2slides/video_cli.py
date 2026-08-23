@@ -23,12 +23,14 @@ from . import audio as audio_mod
 from . import ffmpeg as ffmpeg_mod
 from . import slide_images as images_mod
 from . import tts as tts_mod
+from . import thumbnail as thumbnail_mod
 from . import video as video_mod
 from . import voicevox as voicevox_mod
 from .audio import AudioExportError, AudioOptions
 from .narration import NarrationError
 from .reading import ReadingStyle, load_dictionary
 from .soffice import SofficeError, SofficeNotFoundError
+from .thumbnail import ThumbnailError
 from .video import (
     DEFAULT_AUDIO_BITRATE,
     DEFAULT_CRF,
@@ -171,6 +173,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--keep-work", action="store_true", help="書き出しに使った作業ファイルを残す"
     )
+    publish_group = parser.add_argument_group("投稿の準備")
+    publish_group.add_argument(
+        "--thumbnail",
+        nargs="?",
+        const="",
+        metavar="PATH",
+        help="投稿用のサムネイル画像も書き出す"
+        "(既定: 動画と同じ場所の <名前>_thumbnail.png。資料からの生成時のみ)",
+    )
+    publish_group.add_argument(
+        "--thumbnail-label", default="", help="サムネイルの左上に出す短い文字(例: 第23回)"
+    )
+
     parser.add_argument("--quiet", action="store_true", help="進捗を表示しない")
     parser.add_argument(
         "--check", action="store_true", help="生成に必要な外部ツールの状態だけを表示する"
@@ -269,7 +284,34 @@ def _from_presentation(args, options: VideoOptions) -> int:
         return EXIT_FAILED
 
     _report(result, options, args.quiet)
+    if args.thumbnail is not None:
+        return _write_thumbnail(args, out_path)
     return EXIT_OK
+
+
+def _write_thumbnail(args, video_path: str) -> int:
+    """動画と同じ題で、投稿に使う 1 枚絵も書き出す。
+
+    動画ができたあとに作る。ここで失敗しても動画は残るので、何が起きたかを
+    知らせたうえで、失敗として返す(頼まれたものを作れていないため)。
+    """
+    path = args.thumbnail or _default_thumbnail(video_path)
+    try:
+        thumbnail = thumbnail_mod.from_source(args.input)
+        thumbnail.label = args.thumbnail_label
+        result = thumbnail_mod.export_thumbnail(
+            thumbnail, path, soffice_path=args.soffice, force=args.force
+        )
+    except (ThumbnailError, SofficeError) as exc:
+        print(f"サムネイルを生成できませんでした: {exc}", file=sys.stderr)
+        return EXIT_FAILED
+    if not args.quiet:
+        print(f"サムネイル: {result.path}({result.width}x{result.height})")
+    return EXIT_OK
+
+
+def _default_thumbnail(video_path: str) -> str:
+    return os.path.splitext(video_path)[0] + "_thumbnail.png"
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +320,14 @@ def _from_presentation(args, options: VideoOptions) -> int:
 
 
 def _from_materials(args, options: VideoOptions) -> int:
+    if args.thumbnail is not None:
+        print(
+            "--thumbnail は資料(.pptx)から動画を作るときに使えます"
+            "(書き出し済みの素材には題が入っていないため)。\n"
+            "  題を指定して作る場合は note2slides-thumb を使ってください。",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
     if not args.audio:
         print(
             "--slides だけでは音声が入りません。--audio でナレーション音声の場所も"

@@ -116,6 +116,10 @@ KIND_IMAGE = "image"
 #: `Slide.parts` に書かれた順で入る。教材シナリオだけが作る(記事入力は
 #: 1 枚 = 1 つの中身のまま)。
 KIND_CONTENT = "content"
+#: 動画の外側で使う 1 枚絵(YouTube のサムネイルなど)。資料には入れず、
+#: `thumbnail.py` が単独の .pptx を作るときだけ使う。表紙より文字を大きくし、
+#: 小さく表示されても題が読めるようにする。
+KIND_THUMBNAIL = "thumbnail"
 
 BULLET = "bullet"
 NUMBER = "number"
@@ -197,6 +201,8 @@ class Content:
 class Slide(Content):
     title: str = ""
     subtitle: str = ""
+    #: 左上に小さく出す短い文字(教材名・回数など)。サムネイルだけが使う。
+    label: str = ""
     notes: str = ""
     #: 1 枚に並べる中身(`KIND_CONTENT` のときだけ入る)。書かれた順に縦へ並ぶ。
     parts: List[Content] = field(default_factory=list)
@@ -209,6 +215,8 @@ class Slide(Content):
         data = {"kind": self.kind, "title": self.title}
         if self.subtitle:
             data["subtitle"] = self.subtitle
+        if self.label:
+            data["label"] = self.label
         data.update(self.content_dict())
         if self.parts:
             data["parts"] = [part.to_dict() for part in self.parts]
@@ -230,9 +238,13 @@ class Slide(Content):
 #     code            コード
 #     code:bash       bash のコード
 #     table-continued 前のスライドから続いている表
+#     footer          資料名・ページ番号(読み上げない飾り)
 
 SHAPE_CODE = "code"
 SHAPE_TABLE = "table"
+#: 見た目のために置く文字(資料名・ページ番号)。画面には出るが、内容ではない
+#: ので読み上げない。ナレーション側(narration.py)がこの名前で除外する。
+SHAPE_FOOTER = "footer"
 _SHAPE_CONTINUED = "-continued"
 
 

@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from . import guidance
-from .model import SHAPE_CODE, parse_shape_name
+from .model import SHAPE_CODE, SHAPE_FOOTER, parse_shape_name
 
 #: 読み上げ元の種別。
 SOURCE_NOTES = "notes"
@@ -426,6 +426,12 @@ def _is_code(shape) -> bool:
     return kind == SHAPE_CODE and getattr(shape, "has_text_frame", False)
 
 
+def _is_decoration(shape) -> bool:
+    """資料名・ページ番号のような、読み上げない飾りかどうか。"""
+    kind, _, _ = parse_shape_name(getattr(shape, "name", ""))
+    return kind == SHAPE_FOOTER
+
+
 def _is_picture(shape) -> bool:
     from pptx.enum.shapes import MSO_SHAPE_TYPE
 
@@ -476,6 +482,7 @@ def _body_texts(slide) -> List[str]:
 
     表・画像は文字として読み上げられないため対象外(`_screen_guidance` が
     案内文にする)。コード用の図形も、そのまま読み上げても聞き取れないので外す。
+    資料名・ページ番号(フッタ)は見た目のための飾りなので、これも外す。
     図の説明(キャプション)はここで拾い、図の案内文のあとに読み上げる。
     """
     title = slide.shapes.title
@@ -483,7 +490,9 @@ def _body_texts(slide) -> List[str]:
     for shape in slide.shapes:
         if title is not None and shape.element is title.element:
             continue
-        if _is_code(shape) or not getattr(shape, "has_text_frame", False):
+        if _is_code(shape) or _is_decoration(shape):
+            continue
+        if not getattr(shape, "has_text_frame", False):
             continue
         text = shape.text_frame.text
         if text.strip():

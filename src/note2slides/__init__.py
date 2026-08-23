@@ -17,6 +17,7 @@ Deck(スライド構成)になるところまでが読み取り側の仕事で�
 最後に 1 本の動画(MP4)にまとめられる。
 
     slide_images    : .pptx    -> slide_001.png ...(LibreOffice + pypdfium2)
+    thumbnail       : 題・副題  -> thumbnail.png(投稿に使う 1 枚絵)
     narration       : .pptx    -> ナレーション原稿
     reading         : 原稿     -> 読み上げ単位 + 間の取り方
     tts / voicevox  : 読み上げ単位 -> 合成した音声
@@ -35,7 +36,8 @@ from .reading import ReadingStyle, plan_reading
 from .renderer import render_deck
 from .scenario import Scenario, build_deck, is_scenario_file, parse_scenario, read_scenario
 from .slide_images import ExportResult, ImageOptions, SlideImage, export_slide_images
-from .style import Style
+from .thumbnail import Thumbnail, ThumbnailResult, export_thumbnail
+from .style import Style, Theme
 from .video import (
     Segment,
     SlideSource,
@@ -63,6 +65,9 @@ __all__ = [
     "SlideImage",
     "SlideSource",
     "Style",
+    "Theme",
+    "Thumbnail",
+    "ThumbnailResult",
     "VideoOptions",
     "VideoResult",
     "build_deck",
@@ -70,6 +75,7 @@ __all__ = [
     "convert_file",
     "export_narration",
     "export_slide_images",
+    "export_thumbnail",
     "export_video",
     "extract_script",
     "is_scenario_file",

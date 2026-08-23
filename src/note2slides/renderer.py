@@ -16,18 +16,20 @@ from pptx.oxml.ns import qn
 from pptx.util import Emu, Inches, Pt
 
 from . import layout as layout_mod
-from . import metrics, oxml_utils
+from . import metrics, oxml_utils, text_wrap
 from .layout import Box
 from .model import (
     KIND_CODE,
     KIND_IMAGE,
     KIND_SECTION,
     KIND_TABLE,
+    KIND_THUMBNAIL,
     KIND_TITLE,
     NUMBER,
     PLAIN,
     QUOTE,
     SHAPE_CODE,
+    SHAPE_FOOTER,
     SHAPE_TABLE,
     Bullet,
     Content,
@@ -36,13 +38,56 @@ from .model import (
     Slide,
     shape_name,
 )
-from .style import SLIDE_HEIGHT_EMU, SLIDE_WIDTH_EMU, Style
+from .style import SLIDE_HEIGHT_EMU, SLIDE_WIDTH_EMU, Style, inches_to_pt
 
 _LAYOUT_TITLE = 0
 _LAYOUT_SECTION = 2
 _LAYOUT_TITLE_ONLY = 5
+_LAYOUT_BLANK = 6
 
 _BULLET_CHARS = {0: "●", 1: "–", 2: "・", 3: "・"}
+
+# 表紙・章扉の配置(inch)。タイトルは行数に応じて縦に伸びるので、
+# 「下端(表紙)」「中心(章扉)」を固定して、そこから箱の大きさを決める。
+_COVER_LEFT = 1.0
+_COVER_WIDTH = 11.33
+_COVER_TITLE_MIN_HEIGHT = 1.6
+_COVER_RULE_WIDTH = 2.0
+#: 題の下端から、罫線・副題までの間(inch)。
+_COVER_RULE_GAP = 0.25
+_COVER_SUBTITLE_GAP = 0.5
+_SECTION_CENTER = 3.5
+_SECTION_RULE_TOP = 4.45
+#: 表紙の下端に引く帯(inch)。
+_COVER_BAND_HEIGHT = 0.11
+#: タイトルを何行まで折り返してよいか。
+_COVER_TITLE_MAX_LINES = 3
+#: 見出しの下に引く、うすい罫線の太さ(inch)。
+_HAIRLINE = 0.018
+#: フッタの資料名に使ってよい横幅の割合。
+_FOOTER_TITLE_SHARE = 0.6
+
+# サムネイル(1 枚絵)の配置(inch)と、題に使う文字の大きさ(pt)。
+# 小さく表示されても読めるよう、収まる範囲でいちばん大きい文字を選ぶ。
+_THUMB_LEFT = 1.0
+_THUMB_WIDTH = 11.33
+_THUMB_TITLE_SIZES = (68, 60, 54, 48, 42, 36)
+_THUMB_TITLE_MAX_LINES = 3
+_THUMB_TITLE_MAX_HEIGHT = 3.9
+_THUMB_RULE_WIDTH = 2.2
+_THUMB_RULE_HEIGHT = 0.08
+_THUMB_LABEL_SIZE = 22.0
+_THUMB_LABEL_HEIGHT = 0.58
+_THUMB_SUBTITLE_SIZE = 26.0
+_THUMB_BAND_HEIGHT = 0.16
+_THUMB_RULE_GAP = 0.34
+_THUMB_SUBTITLE_GAP = 0.26
+_THUMB_LABEL_GAP = 0.42
+_THUMB_LABEL_PADDING = 0.22
+_THUMB_TOP_MIN = 1.2
+
+_SLIDE_WIDTH_IN = SLIDE_WIDTH_EMU / 914400
+_SLIDE_HEIGHT_IN = SLIDE_HEIGHT_EMU / 914400
 
 
 def render_deck(deck: Deck, output_path: str, style: Optional[Style] = None) -> str:
@@ -53,6 +98,9 @@ def render_deck(deck: Deck, output_path: str, style: Optional[Style] = None) -> 
 class Renderer:
     def __init__(self, style: Style) -> None:
         self.style = style
+        # フッタ用。`render` が呼ばれたときに、デッキの内容で置き換える。
+        self._deck_title = ""
+        self._total = 1
 
     def render(self, deck: Deck, output_path: str) -> None:
         prs = Presentation()
@@ -60,20 +108,29 @@ class Renderer:
         prs.slide_height = Emu(SLIDE_HEIGHT_EMU)
         prs.core_properties.title = deck.title
 
-        for slide in deck.slides:
-            self._render_slide(prs, slide)
+        # フッタ(資料名とページ番号)のために、全体の枚数と題を持っておく。
+        self._deck_title = deck.title
+        self._total = len(deck.slides)
+
+        for number, slide in enumerate(deck.slides, start=1):
+            self._render_slide(prs, slide, number)
 
         prs.save(output_path)
 
     # -- スライド種別ごとの描画 -----------------------------------------
-    def _render_slide(self, prs: Presentation, slide: Slide) -> None:
+    def _render_slide(self, prs: Presentation, slide: Slide, number: int = 1) -> None:
         if slide.kind == KIND_TITLE:
             pptx_slide = self._title_slide(prs, slide)
+        elif slide.kind == KIND_THUMBNAIL:
+            pptx_slide = self._thumbnail_slide(prs, slide)
         elif slide.kind == KIND_SECTION:
             pptx_slide = self._section_slide(prs, slide)
+            self._draw_footer(pptx_slide, number)
         else:
             pptx_slide = prs.slides.add_slide(prs.slide_layouts[_LAYOUT_TITLE_ONLY])
+            self._paint_background(pptx_slide, self.style.theme.background)
             self._draw_slide_title(pptx_slide, slide.title)
+            self._draw_footer(pptx_slide, number)
             # 1 枚に 1 つでも複数でも、置き場所の決め方は同じ(`layout.fit`)。
             # スライド自身が中身を持つ場合は、1 つだけ並べたものとして扱う。
             parts = slide.parts or [slide]
@@ -85,15 +142,22 @@ class Renderer:
             pptx_slide.notes_slide.notes_text_frame.text = slide.notes
 
     def _title_slide(self, prs: Presentation, slide: Slide):
+        """表紙。動画の最初の 1 枚として、地を塗り分けられるようにする。"""
         pptx_slide = prs.slides.add_slide(prs.slide_layouts[_LAYOUT_TITLE])
-        style = self.style
+        style, theme = self.style, self.style.theme
+        filled = theme.filled_cover
+        self._paint_background(
+            pptx_slide, theme.cover_background if filled else theme.background
+        )
         title_ph = pptx_slide.shapes.title
-        _place(title_ph, 1.0, 2.2, 11.33, 1.6)
+        bottom = theme.cover_title_bottom
+        top, height = self._cover_title_box(slide.title, style.deck_title_size, bottom)
+        _place(title_ph, _COVER_LEFT, top, _COVER_WIDTH, height)
         self._fill_text(
             title_ph.text_frame,
-            [[Run(slide.title)]],
+            [[Run(self._wrapped(slide.title, style.deck_title_size))]],
             size=style.deck_title_size,
-            color=style.color_title,
+            color=theme.cover_title if filled else style.color_title,
             bold=True,
             align=PP_ALIGN.CENTER,
             anchor=MSO_ANCHOR.BOTTOM,
@@ -101,34 +165,181 @@ class Renderer:
 
         subtitle_ph = _placeholder(pptx_slide, 1)
         if slide.subtitle and subtitle_ph is not None:
-            _place(subtitle_ph, 1.0, 4.3, 11.33, 0.9)
+            _place(subtitle_ph, _COVER_LEFT, bottom + _COVER_SUBTITLE_GAP, _COVER_WIDTH, 0.9)
             self._fill_text(
                 subtitle_ph.text_frame,
                 [[Run(slide.subtitle)]],
                 size=style.deck_subtitle_size,
-                color=style.color_muted,
+                color=theme.cover_subtitle if filled else style.color_muted,
                 align=PP_ALIGN.CENTER,
                 anchor=MSO_ANCHOR.TOP,
             )
         elif subtitle_ph is not None:
             _remove_shape(subtitle_ph)
 
-        rule = pptx_slide.shapes.add_shape(
-            MSO_SHAPE.RECTANGLE, Inches(5.67), Inches(4.05), Inches(2.0), Inches(0.045)
+        self._draw_rule(
+            pptx_slide,
+            (_COVER_WIDTH + 2 * _COVER_LEFT - _COVER_RULE_WIDTH) / 2,
+            bottom + _COVER_RULE_GAP,
+            _COVER_RULE_WIDTH,
+            style.title_rule_height,
+            theme.cover_accent if filled else style.color_accent,
         )
-        _paint(rule, self.style.color_accent)
+        if filled:
+            # 下端の帯。文字だけの画面に、下の重みを付ける。
+            self._draw_rule(
+                pptx_slide,
+                0,
+                _SLIDE_HEIGHT_IN - _COVER_BAND_HEIGHT,
+                _SLIDE_WIDTH_IN,
+                _COVER_BAND_HEIGHT,
+                theme.cover_accent,
+            )
         return pptx_slide
 
-    def _section_slide(self, prs: Presentation, slide: Slide):
-        pptx_slide = prs.slides.add_slide(prs.slide_layouts[_LAYOUT_SECTION])
+    def _thumbnail_slide(self, prs: Presentation, slide: Slide):
+        """サムネイル(動画の外側で使う 1 枚絵)。
+
+        画面いっぱいに題を置く。一覧では小さく表示されるため、表紙より文字を
+        大きくし、左ぞろえにして、行の始まりを追いやすくする。
+        """
+        pptx_slide = prs.slides.add_slide(prs.slide_layouts[_LAYOUT_BLANK])
+        style, theme = self.style, self.style.theme
+        filled = theme.filled_cover
+        self._paint_background(
+            pptx_slide, theme.cover_background if filled else theme.background
+        )
+        accent = theme.cover_accent if filled else style.color_accent
+
+        size, lines = self._thumbnail_title(slide.title)
+        title_height = len(lines) * style.line_height_pt(size, 1.0) / 72.0
+        label_height = _THUMB_LABEL_HEIGHT + _THUMB_LABEL_GAP if slide.label else 0.0
+        block = label_height + title_height + _THUMB_RULE_GAP + _THUMB_RULE_HEIGHT
+        if slide.subtitle:
+            block += _THUMB_SUBTITLE_GAP + _THUMB_SUBTITLE_SIZE * 1.4 / 72.0
+        # バッジから副題までを 1 かたまりとして、上下の真ん中に置く。
+        top = max(_THUMB_TOP_MIN, (_SLIDE_HEIGHT_IN - block) / 2) + label_height
+
+        if slide.label:
+            self._draw_thumbnail_label(pptx_slide, slide.label, accent, top)
+
+        box = pptx_slide.shapes.add_textbox(
+            Inches(_THUMB_LEFT), Inches(top), Inches(_THUMB_WIDTH), Inches(title_height + 0.2)
+        )
+        self._fill_text(
+            box.text_frame,
+            [[Run("\n".join(lines))]],
+            size=size,
+            color=theme.cover_title if filled else style.color_title,
+            bold=True,
+            align=PP_ALIGN.LEFT,
+            anchor=MSO_ANCHOR.TOP,
+            line_spacing=1.0,
+        )
+
+        bottom = top + title_height + _THUMB_RULE_GAP
+        self._draw_rule(
+            pptx_slide, _THUMB_LEFT, bottom, _THUMB_RULE_WIDTH, _THUMB_RULE_HEIGHT, accent
+        )
+        if slide.subtitle:
+            sub = pptx_slide.shapes.add_textbox(
+                Inches(_THUMB_LEFT),
+                Inches(bottom + _THUMB_RULE_HEIGHT + _THUMB_SUBTITLE_GAP),
+                Inches(_THUMB_WIDTH),
+                Inches(0.6),
+            )
+            self._fill_text(
+                sub.text_frame,
+                [[Run(slide.subtitle)]],
+                size=_THUMB_SUBTITLE_SIZE,
+                color=theme.cover_subtitle if filled else style.color_muted,
+                align=PP_ALIGN.LEFT,
+            )
+        if filled:
+            self._draw_rule(
+                pptx_slide,
+                0,
+                _SLIDE_HEIGHT_IN - _THUMB_BAND_HEIGHT,
+                _SLIDE_WIDTH_IN,
+                _THUMB_BAND_HEIGHT,
+                accent,
+            )
+        return pptx_slide
+
+    def _thumbnail_title(self, title: str):
+        """サムネイルの題に使う文字の大きさと、折り返した行を選ぶ。
+
+        まず 2 行に収まる中でいちばん大きい文字を探し、無ければ 3 行まで許す。
+        行数を増やして文字を大きくするより、2 行で見せるほうが読みやすいため。
+        """
+        for max_lines in (2, _THUMB_TITLE_MAX_LINES):
+            found = self._thumbnail_fit(title, max_lines)
+            if found:
+                return found
+        size = _THUMB_TITLE_SIZES[-1]
+        # どの大きさでも自然には収まらない題。最後は幅で折り返して収める。
+        return size, text_wrap.fit_lines(
+            title, size, inches_to_pt(_THUMB_WIDTH), _THUMB_TITLE_MAX_LINES
+        )
+
+    def _thumbnail_fit(self, title: str, max_lines: int):
+        """`max_lines` 行に自然に収まる、いちばん大きい文字を探す(無ければ None)。
+
+        語の途中で切ってまで大きくはしない。文字を小さくすれば自然な位置で
+        折り返せるので、そちらを選ぶ。
+        """
+        for size in _THUMB_TITLE_SIZES:
+            lines = text_wrap.natural_fit_lines(
+                title, size, inches_to_pt(_THUMB_WIDTH), max_lines
+            )
+            if lines is None or len(lines) > max_lines:
+                continue
+            if len(lines) * self.style.line_height_pt(size, 1.0) / 72.0 > _THUMB_TITLE_MAX_HEIGHT:
+                continue
+            return size, lines
+        return None
+
+    def _draw_thumbnail_label(self, pptx_slide, label: str, accent, title_top: float) -> None:
+        """左上に置く短い文字(教材名・回数など)。塗った箱に白抜きで入れる。"""
         style = self.style
+        width = (
+            metrics.text_width_em(label) * _THUMB_LABEL_SIZE / 72.0 + _THUMB_LABEL_PADDING * 2
+        )
+        height = _THUMB_LABEL_HEIGHT
+        top = max(0.7, title_top - _THUMB_LABEL_GAP - height)
+        badge = pptx_slide.shapes.add_shape(
+            MSO_SHAPE.ROUNDED_RECTANGLE,
+            Inches(_THUMB_LEFT),
+            Inches(top),
+            Inches(width),
+            Inches(height),
+        )
+        _paint(badge, accent)
+        self._fill_text(
+            badge.text_frame,
+            [[Run(label)]],
+            size=_THUMB_LABEL_SIZE,
+            color=(0xFF, 0xFF, 0xFF),
+            bold=True,
+            align=PP_ALIGN.CENTER,
+            anchor=MSO_ANCHOR.MIDDLE,
+        )
+
+    def _section_slide(self, prs: Presentation, slide: Slide):
+        """章扉。本文より少し濃い地にして、章の変わり目が分かるようにする。"""
+        pptx_slide = prs.slides.add_slide(prs.slide_layouts[_LAYOUT_SECTION])
+        style, theme = self.style, self.style.theme
+        self._paint_background(pptx_slide, theme.section_background)
         title_ph = pptx_slide.shapes.title
-        _place(title_ph, 0.9, 2.7, 11.53, 1.6)
+        size = style.section_title_size
+        lines = self._wrap_lines(slide.title, size, style.title_width)
+        height = max(_COVER_TITLE_MIN_HEIGHT, len(lines) * style.line_height_pt(size) / 72.0)
+        _place(title_ph, style.title_left, _SECTION_CENTER - height / 2, style.title_width, height)
         self._fill_text(
             title_ph.text_frame,
-            [[Run(slide.title)]],
-            size=style.section_title_size,
-            color=style.color_title,
+            [[Run("\n".join(lines))]],
+            size=size,
+            color=theme.section_title,
             bold=True,
             align=PP_ALIGN.CENTER,
             anchor=MSO_ANCHOR.MIDDLE,
@@ -136,14 +347,18 @@ class Renderer:
         for ph in list(pptx_slide.placeholders):
             if ph != title_ph:
                 _remove_shape(ph)
-        rule = pptx_slide.shapes.add_shape(
-            MSO_SHAPE.RECTANGLE, Inches(5.67), Inches(4.45), Inches(2.0), Inches(0.045)
+        self._draw_rule(
+            pptx_slide,
+            (style.title_width + 2 * style.title_left - _COVER_RULE_WIDTH) / 2,
+            max(_SECTION_RULE_TOP, _SECTION_CENTER + height / 2 + 0.15),
+            _COVER_RULE_WIDTH,
+            style.title_rule_height,
+            style.color_accent,
         )
-        _paint(rule, style.color_accent)
         return pptx_slide
 
     def _draw_slide_title(self, pptx_slide, title: str) -> None:
-        style = self.style
+        style, theme = self.style, self.style.theme
         title_ph = pptx_slide.shapes.title
         if title_ph is None:
             return
@@ -161,14 +376,109 @@ class Renderer:
             anchor=MSO_ANCHOR.MIDDLE,
             shrink_to_fit=True,
         )
-        rule = pptx_slide.shapes.add_shape(
-            MSO_SHAPE.RECTANGLE,
-            Inches(style.title_left),
-            Inches(style.title_rule_top),
-            Inches(style.title_width),
-            Inches(style.title_rule_height),
+        if theme.accent_rule_width > 0:
+            # 幅いっぱいのうすい罫線に、左端だけ濃い罫線を重ねる。
+            self._draw_rule(
+                pptx_slide,
+                style.title_left,
+                style.title_rule_top + (style.title_rule_height - _HAIRLINE) / 2,
+                style.title_width,
+                _HAIRLINE,
+                theme.rule,
+            )
+            self._draw_rule(
+                pptx_slide,
+                style.title_left,
+                style.title_rule_top,
+                theme.accent_rule_width,
+                style.title_rule_height,
+                style.color_accent,
+            )
+        else:
+            self._draw_rule(
+                pptx_slide,
+                style.title_left,
+                style.title_rule_top,
+                style.title_width,
+                style.title_rule_height,
+                style.color_accent,
+            )
+
+    def _draw_footer(self, pptx_slide, number: int) -> None:
+        """下端に、資料名(左)とページ番号(右)を小さく置く。"""
+        theme = self.style.theme
+        if not theme.footer:
+            return
+        style = self.style
+        for text, align in (
+            (self._footer_title(), PP_ALIGN.LEFT),
+            (f"{number} / {self._total}", PP_ALIGN.RIGHT),
+        ):
+            if not text:
+                continue
+            box = pptx_slide.shapes.add_textbox(
+                Inches(style.title_left),
+                Inches(theme.footer_top),
+                Inches(style.title_width),
+                Inches(0.3),
+            )
+            # 飾りであって内容ではないので、ナレーションが読み上げないよう
+            # 図形の名前に種類を残す(model.shape_name)。
+            box.name = shape_name(SHAPE_FOOTER)
+            self._fill_text(
+                box.text_frame,
+                [[Run(text)]],
+                size=theme.footer_size,
+                color=theme.footer_color,
+                align=align,
+            )
+
+    def _footer_title(self) -> str:
+        """フッタに出す資料名。長い場合は幅に収まるところまでにする。"""
+        title = (self._deck_title or "").strip()
+        if not title:
+            return ""
+        avail = inches_to_pt(self.style.title_width * _FOOTER_TITLE_SHARE) / self.style.theme.footer_size
+        if metrics.text_width_em(title) <= avail:
+            return title
+        clipped = ""
+        used = 0.0
+        for ch in title:
+            if used + metrics.char_width(ch) > avail - 1:
+                break
+            clipped += ch
+            used += metrics.char_width(ch)
+        return clipped + "…"
+
+    # -- 折り返しと地の色 -----------------------------------------------
+    def _wrap_lines(self, text: str, size: float, width: float = _COVER_WIDTH):
+        """大きく映るタイトルを、自然な位置で折り返した行にする。"""
+        return text_wrap.fit_lines(text, size, inches_to_pt(width), _COVER_TITLE_MAX_LINES)
+
+    def _wrapped(self, text: str, size: float, width: float = _COVER_WIDTH) -> str:
+        return "\n".join(self._wrap_lines(text, size, width))
+
+    def _cover_title_box(self, title: str, size: float, bottom: float):
+        """行数ぶんの高さを取り、下端をそろえた箱を返す(top, height)。"""
+        lines = self._wrap_lines(title, size)
+        height = max(_COVER_TITLE_MIN_HEIGHT, len(lines) * self.style.line_height_pt(size) / 72.0)
+        return bottom - height, height
+
+    def _paint_background(self, pptx_slide, rgb) -> None:
+        """スライドの地を塗る。白のままなら何も書かない(従来の出力と同じにする)。"""
+        if tuple(rgb) == (0xFF, 0xFF, 0xFF):
+            return
+        fill = pptx_slide.background.fill
+        fill.solid()
+        fill.fore_color.rgb = RGBColor(*rgb)
+
+    def _draw_rule(self, pptx_slide, left, top, width, height, rgb):
+        """細い矩形を 1 つ置く(罫線・帯に使う)。"""
+        shape = pptx_slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE, Inches(left), Inches(top), Inches(width), Inches(height)
         )
-        _paint(rule, style.color_accent)
+        _paint(shape, rgb)
+        return shape
 
     # -- 本文 -----------------------------------------------------------
     def _draw_content(self, pptx_slide, content: Content, box: Box, continued: bool) -> None:
@@ -316,7 +626,10 @@ class Renderer:
             picture.height = int(picture.height * ratio)
             picture.width = int(picture.width * ratio)
         picture.left = int(Inches(box.left) + (Inches(box.width) - picture.width) / 2)
-        picture.top = Inches(box.top)
+        # 図が場所を余らせた場合は、上に貼り付けず、渡された場所の中で上下も
+        # 真ん中に置く(図だけの画面で、下に大きな空きができるのを避ける)。
+        spare = Inches(box.height) - picture.height - Inches(caption_space)
+        picture.top = int(Inches(box.top) + max(0, spare) / 2)
 
         if content.image_alt:
             top = picture.top + picture.height + Inches(0.1)
@@ -342,6 +655,7 @@ class Renderer:
         align=PP_ALIGN.LEFT,
         anchor=MSO_ANCHOR.TOP,
         shrink_to_fit: bool = False,
+        line_spacing: Optional[float] = None,
     ) -> None:
         frame.word_wrap = True
         frame.vertical_anchor = anchor
@@ -349,6 +663,8 @@ class Renderer:
         for index, runs in enumerate(paragraphs):
             paragraph = frame.paragraphs[0] if index == 0 else frame.add_paragraph()
             paragraph.alignment = align
+            if line_spacing is not None:
+                paragraph.line_spacing = line_spacing
             oxml_utils.set_no_bullet(paragraph)
             self._write_runs(paragraph, runs, size, color, bold=bold)
         if shrink_to_fit:

@@ -7,8 +7,10 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from note2slides import convert_file
 from note2slides import ffmpeg as ffmpeg_mod
 from note2slides import video_cli
+from note2slides.soffice import find_soffice
 from note2slides.waveform import Waveform, write_wav
 
 requires_ffmpeg = pytest.mark.skipif(
@@ -185,6 +187,42 @@ def test_default_output_drops_the_materials_suffix():
 
 
 @requires_ffmpeg
+# ---------------------------------------------------------------------------
+# 投稿用のサムネイル(--thumbnail)
+# ---------------------------------------------------------------------------
+
+
+def test_thumbnail_is_named_after_the_video():
+    assert video_cli._default_thumbnail("build/lesson.mp4") == "build/lesson_thumbnail.png"
+
+
+def test_thumbnail_needs_a_presentation(tmp_path, capsys):
+    """素材からの動画には題が無いので、サムネイルは作れないと知らせる。"""
+    slides, audio = make_materials(tmp_path)
+
+    code = video_cli.main(
+        ["--slides", slides, "--audio", audio, "-o", str(tmp_path / "m.mp4"), "--thumbnail"]
+    )
+
+    assert code == video_cli.EXIT_USAGE
+    assert "note2slides-thumb" in capsys.readouterr().err
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(find_soffice() is None, reason="LibreOffice(soffice)が見つかりません")
+def test_thumbnail_is_written_next_to_the_video(tmp_path):
+    md = tmp_path / "lesson.md"
+    md.write_text("---\ntitle: 教材動画のつくり方\n---\n\n## 節\n\n本文。\n", encoding="utf-8")
+    pptx_path = str(tmp_path / "lesson.pptx")
+    convert_file(str(md), pptx_path)
+    args = video_cli.build_parser().parse_args([pptx_path, "--thumbnail", "--quiet"])
+
+    code = video_cli._write_thumbnail(args, str(tmp_path / "lesson.mp4"))
+
+    assert code == video_cli.EXIT_OK
+    assert os.path.isfile(str(tmp_path / "lesson_thumbnail.png"))
+
+
 def test_check_reports_ffmpeg(capsys):
     assert video_cli._check_ffmpeg(None) is True
 
