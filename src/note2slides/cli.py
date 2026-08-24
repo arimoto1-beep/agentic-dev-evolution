@@ -28,6 +28,7 @@ from typing import List, Optional
 from . import __version__
 from . import note_source
 from . import scenario as scenario_mod
+from .console import use_utf8_output
 from .markdown_reader import parse_article_file
 from .model import Article, Deck
 from .note_source import NoteError
@@ -128,6 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    use_utf8_output()
     args = build_parser().parse_args(argv)
     from_url = note_source.is_http_url(args.input)
 

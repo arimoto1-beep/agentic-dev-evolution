@@ -11,6 +11,7 @@ import sys
 from typing import List, Optional
 
 from . import __version__
+from .console import use_utf8_output
 from .slide_images import (
     FORMATS,
     ImageOptions,
@@ -77,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    use_utf8_output()
     args = build_parser().parse_args(argv)
 
     if args.check:

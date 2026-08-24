@@ -25,6 +25,7 @@ from .audio import (
     export_narration,
     ffmpeg_pattern,
 )
+from .console import use_utf8_output
 from .narration import NarrationError, extract_script
 from .reading import ReadingStyle, load_dictionary
 
@@ -195,6 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    use_utf8_output()
     args = build_parser().parse_args(argv)
     voicevox_options = voicevox_options_from(args)
 

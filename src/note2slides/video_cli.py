@@ -28,6 +28,7 @@ from . import thumbnail as thumbnail_mod
 from . import video as video_mod
 from . import voicevox as voicevox_mod
 from .audio import AudioExportError, AudioOptions
+from .console import use_utf8_output
 from .narration import NarrationError
 from .reading import ReadingStyle, load_dictionary
 from .soffice import SofficeError, SofficeNotFoundError
@@ -212,6 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    use_utf8_output()
     args = build_parser().parse_args(argv)
 
     if args.check:

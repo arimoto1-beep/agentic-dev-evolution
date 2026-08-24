@@ -18,6 +18,7 @@ from typing import List, Optional
 
 from . import __version__
 from . import thumbnail as thumbnail_mod
+from .console import use_utf8_output
 from .slide_images import FORMATS
 from .soffice import SofficeError
 from .style import DEFAULT_THEME, Style, get_theme, theme_names
@@ -71,6 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    use_utf8_output()
     args = build_parser().parse_args(argv)
 
     if not args.input and not args.title:

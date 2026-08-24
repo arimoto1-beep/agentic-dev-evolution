@@ -18,6 +18,7 @@ from . import voice_survey
 from . import voicevox as voicevox_mod
 from .audio import DEFAULT_LOUDNESS_LUFS, AudioExportError, AudioOptions
 from .audio_cli import check_tools, voicevox_options_from
+from .console import use_utf8_output
 from .reading import ReadingStyle, load_dictionary
 from .voice_compare import (
     CANDIDATES,
@@ -120,6 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    use_utf8_output()
     args = build_parser().parse_args(argv)
     voicevox_options = voicevox_options_from(args)
 
