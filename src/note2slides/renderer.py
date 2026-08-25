@@ -19,7 +19,9 @@ from . import layout as layout_mod
 from . import metrics, oxml_utils, text_wrap
 from .layout import Box
 from .model import (
+    DIAGRAM_FRAME,
     KIND_CODE,
+    KIND_DIAGRAM,
     KIND_IMAGE,
     KIND_SECTION,
     KIND_TABLE,
@@ -29,6 +31,8 @@ from .model import (
     PLAIN,
     QUOTE,
     SHAPE_CODE,
+    SHAPE_DIAGRAM,
+    SHAPE_DIAGRAM_ITEM,
     SHAPE_FOOTER,
     SHAPE_TABLE,
     Bullet,
@@ -489,6 +493,8 @@ class Renderer:
             self._draw_table(pptx_slide, content, box, continued)
         elif content.kind == KIND_IMAGE:
             self._draw_image(pptx_slide, content, box)
+        elif content.kind == KIND_DIAGRAM:
+            self._draw_diagram(pptx_slide, content, box)
         else:
             self._draw_bullets(pptx_slide, content.bullets, box)
 
@@ -615,6 +621,110 @@ class Renderer:
                 cell.margin_left = Inches(0.1)
                 cell.margin_right = Inches(0.1)
 
+    def _draw_diagram(self, pptx_slide, content: Content, box: Box) -> None:
+        """図解を図形として描く。
+
+        文字を等幅で並べた ASCII アートは、日本語と罫線が同じ幅で描かれる
+        フォントを前提にしていて、資料 -> PDF -> 画像と変換する間にどこかで
+        崩れる。ここでは箱と矢印を図形として置くので、フォントに依存しない。
+        """
+        items = [t for t in content.diagram_items if t.strip()]
+        if not items:
+            return
+        style = self.style
+        frame_shape = content.diagram_shape == DIAGRAM_FRAME
+
+        # 必要な高さに対して場所が足りなければ、全体を縮めて収める
+        # (図が下の中身に重なるより、小さく出るほうがよい)。
+        natural = layout_mod.diagram_height(content, style)
+        scale = min(1.0, box.height / natural) if natural > 0 else 1.0
+        item_h = style.diagram_item_height * scale
+        gap = (style.diagram_item_gap if frame_shape else style.diagram_arrow_height) * scale
+        pad = style.diagram_frame_padding * scale
+        font_pt = style.diagram_size * scale
+
+        inner_w = self._diagram_width(items, font_pt)
+        total_w = inner_w + 2 * pad if frame_shape else inner_w
+        total_h = len(items) * item_h + (len(items) - 1) * gap + (2 * pad if frame_shape else 0)
+        left = box.left + (box.width - total_w) / 2
+        top = box.top + max(0.0, box.height - total_h) / 2
+
+        # 外枠。案内文を二重に出さないよう、図解 1 つにつきこの図形だけに
+        # 図解の名前を付ける(narration._is_diagram が見る)。
+        outer = pptx_slide.shapes.add_shape(
+            MSO_SHAPE.ROUNDED_RECTANGLE,
+            Inches(left),
+            Inches(top),
+            Inches(total_w),
+            Inches(total_h),
+        )
+        outer.name = shape_name(SHAPE_DIAGRAM, language=content.diagram_shape)
+        _zero_insets(outer.text_frame)
+        if frame_shape:
+            # 枠図では、この外枠が図そのもの(何が中に入っているかを示す)。
+            _paint(outer, style.color_code_bg)
+            _outline(outer, style.color_accent, 1.75)
+        else:
+            # 流れ図では、外枠は案内文を作るときの目印として置くだけなので
+            # 描かない(地を塗ると、項目の箱の間にだけ帯が残って figure に見える)。
+            outer.fill.background()
+            _no_outline(outer)
+
+        item_left = left + (pad if frame_shape else 0.0)
+        item_top = top + (pad if frame_shape else 0.0)
+        for index, text in enumerate(items):
+            if index > 0:
+                if frame_shape:
+                    item_top += gap
+                else:
+                    self._draw_diagram_arrow(pptx_slide, item_left, item_top, inner_w, gap)
+                    item_top += gap
+            self._draw_diagram_item(pptx_slide, text, item_left, item_top, inner_w, item_h, font_pt)
+            item_top += item_h
+
+    def _diagram_width(self, items: List[str], font_pt: float) -> float:
+        """項目の箱の幅(inch)。いちばん長い項目に合わせ、全部を同じ幅にする。"""
+        style = self.style
+        widest = max((metrics.text_width_em(t) for t in items), default=0.0)
+        width = widest * font_pt / 72.0 + 2 * style.diagram_item_padding
+        return min(style.diagram_max_width, max(style.diagram_min_width, width))
+
+    def _draw_diagram_item(
+        self, pptx_slide, text: str, left: float, top: float, width: float, height: float,
+        font_pt: float,
+    ) -> None:
+        style = self.style
+        shape = pptx_slide.shapes.add_shape(
+            MSO_SHAPE.ROUNDED_RECTANGLE, Inches(left), Inches(top), Inches(width), Inches(height)
+        )
+        shape.name = shape_name(SHAPE_DIAGRAM_ITEM)
+        _paint(shape, (0xFF, 0xFF, 0xFF))
+        _outline(shape, style.color_accent, 1.25)
+        frame = shape.text_frame
+        frame.word_wrap = True
+        frame.vertical_anchor = MSO_ANCHOR.MIDDLE
+        _zero_insets(frame)
+        self._fill_text(
+            frame, [[Run(text)]], size=font_pt, color=style.color_body, align=PP_ALIGN.CENTER
+        )
+
+    def _draw_diagram_arrow(
+        self, pptx_slide, item_left: float, top: float, item_width: float, height: float
+    ) -> None:
+        """項目と項目の間に置く下向きの矢印。"""
+        style = self.style
+        width = min(0.34, height)
+        shape = pptx_slide.shapes.add_shape(
+            MSO_SHAPE.DOWN_ARROW,
+            Inches(item_left + (item_width - width) / 2),
+            Inches(top + height * 0.12),
+            Inches(width),
+            Inches(height * 0.76),
+        )
+        shape.name = shape_name(SHAPE_DIAGRAM_ITEM)
+        _paint(shape, style.color_accent)
+        _no_outline(shape)
+
     def _draw_image(self, pptx_slide, content: Content, box: Box) -> None:
         style = self.style
         caption_space = layout_mod.caption_height() if content.image_alt else 0.0
@@ -730,6 +840,16 @@ def _paint(shape, rgb) -> None:
     shape.fill.fore_color.rgb = RGBColor(*rgb)
     shape.line.fill.background()
     shape.shadow.inherit = False
+
+
+def _outline(shape, rgb, width_pt: float) -> None:
+    line = shape.line
+    line.color.rgb = RGBColor(*rgb)
+    line.width = Pt(width_pt)
+
+
+def _no_outline(shape) -> None:
+    shape.line.fill.background()
 
 
 def _zero_insets(frame) -> None:

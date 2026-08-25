@@ -16,6 +16,7 @@ from .model import (
     BULLET,
     KIND_BULLETS,
     KIND_CODE,
+    KIND_DIAGRAM,
     KIND_IMAGE,
     KIND_SECTION,
     KIND_TABLE,
@@ -34,6 +35,7 @@ from .model import (
     Slide,
     SlideBreak,
     Table,
+    diagram_shape_of,
 )
 from .style import Style
 
@@ -186,6 +188,19 @@ class _Planner:
 
         if isinstance(block, CodeBlock):
             self._flush()
+            shape = diagram_shape_of(block.lang)
+            if shape:
+                items = [line.strip() for line in block.text.splitlines() if line.strip()]
+                if items:
+                    self.deck.slides.append(
+                        Slide(
+                            kind=KIND_DIAGRAM,
+                            title=self._next_title(),
+                            diagram_shape=shape,
+                            diagram_items=items,
+                        )
+                    )
+                return
             for index, chunk in enumerate(_chunk_lines(block.text, self.opt.max_code_lines)):
                 self.deck.slides.append(
                     Slide(

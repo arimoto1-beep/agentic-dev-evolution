@@ -28,6 +28,8 @@ from __future__ import annotations
 import re
 from typing import List, Sequence
 
+from .model import DIAGRAM_FRAME
+
 #: 画面を指す言い方。「続き」は、1 枚に収まらず次のスライドへ分かれた場合。
 TABLE_LEAD = "画面の表をご覧ください。"
 TABLE_CONTINUED = "表の続きです。"
@@ -76,6 +78,9 @@ CODE_HOLD_PER_LINE = 0.6
 CODE_HOLD_MIN = 1.0
 CODE_HOLD_MAX = 6.0
 IMAGE_HOLD = 1.5
+#: 図解は、案内文を聞いたあとに図そのものを目で追う時間が要る。
+DIAGRAM_HOLD_PER_ITEM = 0.5
+DIAGRAM_HOLD_MAX = 3.0
 
 #: 日本語が含まれるか(コメントが読み手向けの文かどうかの判断に使う)。
 _JAPANESE = re.compile(r"[ぁ-んァ-ヶ一-龥々〆ー]")
@@ -228,3 +233,26 @@ def describe_image(continued: bool = False) -> str:
 def hold_for_image() -> float:
     """図を画面で見るための時間(秒)。"""
     return IMAGE_HOLD
+
+
+def describe_diagram(shape: str, items: Sequence[str]) -> str:
+    """図解の画面を案内する文。
+
+    画像の図と違い、図解は画面に出ている文字が分かっている。表と同じ考え方で、
+    **画面に出ている文字だけ** を、画面に出ている順に読む。並べ替えたり、
+    そこから言えることを足したりはしない(それを書けるのは書いた人だけ)。
+    """
+    values = [_cell(item) for item in items]
+    values = [v for v in values if v]
+    if not values:
+        return ""
+    if shape == DIAGRAM_FRAME:
+        return f"{IMAGE_LEAD}枠の中には、{_enumerate(values)}が入っています。"
+    if len(values) == 1:
+        return f"{IMAGE_LEAD}{values[0]}、という図です。"
+    return f"{IMAGE_LEAD}上から順に、{_enumerate(values)}と進みます。"
+
+
+def hold_for_diagram(items: Sequence[str]) -> float:
+    """図解を画面で読むための時間(秒)。項目が多いほど長く取る。"""
+    return min(DIAGRAM_HOLD_MAX, DIAGRAM_HOLD_PER_ITEM * max(1, len(items)))

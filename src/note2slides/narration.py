@@ -36,7 +36,13 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from . import guidance
-from .model import SHAPE_CODE, SHAPE_FOOTER, parse_shape_name
+from .model import (
+    SHAPE_CODE,
+    SHAPE_DIAGRAM,
+    SHAPE_DIAGRAM_ITEM,
+    SHAPE_FOOTER,
+    parse_shape_name,
+)
 
 #: 読み上げ元の種別。
 SOURCE_NOTES = "notes"
@@ -388,9 +394,16 @@ def _screen_guidance(slide) -> Tuple[List[str], float]:
     """
     parts: List[str] = []
     hold = 0.0
-    for shape in slide.shapes:
-        _, continued, language = parse_shape_name(getattr(shape, "name", ""))
-        if getattr(shape, "has_table", False):
+    diagrams = _diagram_items(slide)
+    for position, shape in enumerate(slide.shapes):
+        kind, continued, language = parse_shape_name(getattr(shape, "name", ""))
+        if kind == SHAPE_DIAGRAM:
+            items = diagrams.get(position, [])
+            text = guidance.describe_diagram(language, items)
+            hold = max(hold, guidance.hold_for_diagram(items))
+        elif kind == SHAPE_DIAGRAM_ITEM:
+            continue  # 図解の中の図形。案内文は外枠のところで 1 度だけ作る
+        elif getattr(shape, "has_table", False):
             header, rows = _table_cells(shape.table)
             text = guidance.describe_table(header, rows, continued=continued)
         elif _is_code(shape):
@@ -405,6 +418,34 @@ def _screen_guidance(slide) -> Tuple[List[str], float]:
         if text:
             parts.append(text)
     return parts, hold
+
+
+def _diagram_items(slide) -> dict:
+    """図解の外枠ごとに、その中の項目の文字を集める。
+
+    図解は「外枠 -> 項目 -> 項目 …」の順に置かれる(renderer._draw_diagram)。
+    1 枚に図解が 2 つあっても混ざらないよう、外枠が現れるたびに集め直す。
+
+    どの外枠のものかは **並び順** で覚える。python-pptx の図形は、
+    `slide.shapes` を見るたびに作り直される入れ物なので、同じ図形でも
+    `id()` は同じにならず、たまたま一致することもある(別の図の項目が
+    混ざる)。並び順なら、同じ資料を読むかぎり同じものを指す。
+    """
+    found: dict = {}
+    current: Optional[List[str]] = None
+    for position, shape in enumerate(slide.shapes):
+        kind, _, _ = parse_shape_name(getattr(shape, "name", ""))
+        if kind == SHAPE_DIAGRAM:
+            current = []
+            found[position] = current
+        elif kind == SHAPE_DIAGRAM_ITEM and current is not None:
+            text = getattr(shape, "text_frame", None)
+            text = text.text.strip() if text is not None else ""
+            if text:
+                current.append(text)
+        elif kind not in (SHAPE_DIAGRAM, SHAPE_DIAGRAM_ITEM):
+            current = None
+    return found
 
 
 def _table_cells(table) -> Tuple[List[str], List[List[str]]]:
@@ -424,6 +465,12 @@ def _table_cells(table) -> Tuple[List[str], List[List[str]]]:
 def _is_code(shape) -> bool:
     kind, _, _ = parse_shape_name(getattr(shape, "name", ""))
     return kind == SHAPE_CODE and getattr(shape, "has_text_frame", False)
+
+
+def _is_diagram_part(shape) -> bool:
+    """図解を作っている図形かどうか(外枠・項目・矢印)。"""
+    kind, _, _ = parse_shape_name(getattr(shape, "name", ""))
+    return kind in (SHAPE_DIAGRAM, SHAPE_DIAGRAM_ITEM)
 
 
 def _is_decoration(shape) -> bool:
@@ -484,13 +531,16 @@ def _body_texts(slide) -> List[str]:
     案内文にする)。コード用の図形も、そのまま読み上げても聞き取れないので外す。
     資料名・ページ番号(フッタ)は見た目のための飾りなので、これも外す。
     図の説明(キャプション)はここで拾い、図の案内文のあとに読み上げる。
+
+    図解(箱と矢印)の中の文字も外す。ここで拾うと、`_screen_guidance` が
+    作った案内文のあとに、同じ語がもう一度並んで読み上げられる。
     """
     title = slide.shapes.title
     texts = []
     for shape in slide.shapes:
         if title is not None and shape.element is title.element:
             continue
-        if _is_code(shape) or _is_decoration(shape):
+        if _is_code(shape) or _is_decoration(shape) or _is_diagram_part(shape):
             continue
         if not getattr(shape, "has_text_frame", False):
             continue

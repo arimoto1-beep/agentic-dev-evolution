@@ -40,6 +40,7 @@ from .model import (
     KIND_BULLETS,
     KIND_CODE,
     KIND_CONTENT,
+    KIND_DIAGRAM,
     KIND_IMAGE,
     KIND_SECTION,
     KIND_TABLE,
@@ -58,6 +59,7 @@ from .model import (
     Slide,
     SlideBreak,
     Table,
+    diagram_shape_of,
 )
 from .style import Style
 
@@ -487,7 +489,11 @@ def _screen_parts(
         elif isinstance(block, Table):
             parts.append(_table_part(scenario, source, block, warnings))
         elif isinstance(block, CodeBlock):
-            parts.append(_code_part(scenario, source, block, warnings))
+            shape = diagram_shape_of(block.lang)
+            if shape:
+                parts.append(_diagram_part(scenario, source, block, shape, warnings))
+            else:
+                parts.append(_code_part(scenario, source, block, warnings))
     if texts:
         parts.append(_text_part(texts))
     return parts
@@ -625,6 +631,32 @@ def _code_part(
             f"（1 枚に収まるのは {planner_mod.PlannerOptions.max_code_lines} 行程度です）。"
         )
     return Content(kind=KIND_CODE, code=block.text, code_lang=block.lang)
+
+
+#: 1 枚に無理なく置ける図解の項目数。これを超えると 1 つ 1 つが小さくなる。
+MAX_DIAGRAM_ITEMS = 6
+
+
+def _diagram_part(
+    scenario: Scenario,
+    source: ScenarioSlide,
+    block: CodeBlock,
+    shape: str,
+    warnings: List[str],
+) -> Content:
+    """図解のブロック。1 行が 1 つの項目になる(空行は読み飛ばす)。"""
+    items = [line.strip() for line in block.text.splitlines() if line.strip()]
+    if not items:
+        raise ScenarioError(
+            f"{_where(scenario, source)}: 図の中身が空です。\n"
+            "  1 行に 1 つずつ、図に出す項目を書いてください。"
+        )
+    if len(items) > MAX_DIAGRAM_ITEMS:
+        warnings.append(
+            f"{_where(scenario, source)}: 図の項目が {len(items)} 個あります"
+            f"（1 枚に収まるのは {MAX_DIAGRAM_ITEMS} 個程度です）。"
+        )
+    return Content(kind=KIND_DIAGRAM, diagram_shape=shape, diagram_items=items)
 
 
 def _text_part(texts: List[object]) -> Content:

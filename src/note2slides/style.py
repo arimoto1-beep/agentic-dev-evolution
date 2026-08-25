@@ -144,6 +144,7 @@ class Style:
     code_size: float = 14
     table_size: float = 14
     caption_size: float = 13
+    diagram_size: float = 18
 
     # 行間・間隔
     line_spacing: float = 1.22
@@ -158,6 +159,22 @@ class Style:
 
     # 1 枚に複数の中身(文章と図など)を並べるときの、上下の間隔 (inch)
     part_gap: float = 0.24
+
+    # 図解 (inch)
+    #: 項目 1 つの高さ。
+    diagram_item_height: float = 0.56
+    #: 流れ図で、項目と項目の間(矢印を置く場所)。
+    diagram_arrow_height: float = 0.30
+    #: 枠図で、項目と項目の間。
+    diagram_item_gap: float = 0.12
+    #: 枠図の外枠と、中の項目との間。
+    diagram_frame_padding: float = 0.26
+    #: 項目の箱の、文字の左右に取る余白(この 2 倍が箱の幅に足される)。
+    diagram_item_padding: float = 0.42
+    #: 項目の箱の幅の下限と上限。短い語ばかりでも細くなりすぎず、長い文でも
+    #: 画面いっぱいには広げない(図は中央に置くので、幅が揃っていた方が読める)。
+    diagram_min_width: float = 3.4
+    diagram_max_width: float = 7.6
 
     def body_size(self, level: int) -> float:
         sizes = self.body_sizes

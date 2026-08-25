@@ -116,10 +116,32 @@ KIND_IMAGE = "image"
 #: `Slide.parts` に書かれた順で入る。教材シナリオだけが作る(記事入力は
 #: 1 枚 = 1 つの中身のまま)。
 KIND_CONTENT = "content"
+#: 図解(流れ・枠)。ASCII アートではなく図形として描く。教材の図は
+#: 「順に進む」か「何かの中に入っている」かのどちらかで書けることが多いので、
+#: その 2 つだけを持つ。中身は `Content.diagram_items` に書かれた順で入る。
+KIND_DIAGRAM = "diagram"
 #: 動画の外側で使う 1 枚絵(YouTube のサムネイルなど)。資料には入れず、
 #: `thumbnail.py` が単独の .pptx を作るときだけ使う。表紙より文字を大きくし、
 #: 小さく表示されても題が読めるようにする。
 KIND_THUMBNAIL = "thumbnail"
+
+#: 上から下へ、矢印でつなぐ図(工程・流れ)。
+DIAGRAM_FLOW = "flow"
+#: 枠の中に並べる図(何が含まれているか)。
+DIAGRAM_FRAME = "frame"
+DIAGRAM_SHAPES = (DIAGRAM_FLOW, DIAGRAM_FRAME)
+#: コードブロックの言語名として書く、図解の指定。日本語と英語のどちらでも書ける。
+DIAGRAM_LANGS = {
+    "流れ": DIAGRAM_FLOW,
+    "flow": DIAGRAM_FLOW,
+    "枠": DIAGRAM_FRAME,
+    "frame": DIAGRAM_FRAME,
+}
+
+
+def diagram_shape_of(lang: str) -> Optional[str]:
+    """コードブロックの言語名が図解の指定なら、その形を返す。"""
+    return DIAGRAM_LANGS.get((lang or "").strip().lower())
 
 BULLET = "bullet"
 NUMBER = "number"
@@ -161,6 +183,8 @@ class Content:
     table_rows: List[List[str]] = field(default_factory=list)
     image_path: Optional[str] = None
     image_alt: str = ""
+    diagram_shape: str = ""
+    diagram_items: List[str] = field(default_factory=list)
 
     def content_dict(self) -> dict:
         """中身のフィールドだけを辞書にする(種類・見出しは含めない)。"""
@@ -176,6 +200,8 @@ class Content:
             data["table"] = {"header": self.table_header, "rows": self.table_rows}
         if self.image_path:
             data["image"] = {"path": self.image_path, "alt": self.image_alt}
+        if self.diagram_items:
+            data["diagram"] = {"shape": self.diagram_shape, "items": list(self.diagram_items)}
         return data
 
     def to_dict(self) -> dict:
@@ -193,6 +219,8 @@ class Content:
             table_rows=self.table_rows,
             image_path=self.image_path,
             image_alt=self.image_alt,
+            diagram_shape=self.diagram_shape,
+            diagram_items=list(self.diagram_items),
             notes=notes,
         )
 
@@ -242,6 +270,10 @@ class Slide(Content):
 
 SHAPE_CODE = "code"
 SHAPE_TABLE = "table"
+#: 図解の外枠。図解は複数の図形でできているので、案内文を二重に出さないよう、
+#: この名前を付けるのは外枠の 1 つだけにする(中の図形は SHAPE_DIAGRAM_ITEM)。
+SHAPE_DIAGRAM = "diagram"
+SHAPE_DIAGRAM_ITEM = "diagram-item"
 #: 見た目のために置く文字(資料名・ページ番号)。画面には出るが、内容ではない
 #: ので読み上げない。ナレーション側(narration.py)がこの名前で除外する。
 SHAPE_FOOTER = "footer"

@@ -21,7 +21,15 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from . import metrics
-from .model import KIND_CODE, KIND_IMAGE, KIND_TABLE, Bullet, Content
+from .model import (
+    DIAGRAM_FRAME,
+    KIND_CODE,
+    KIND_DIAGRAM,
+    KIND_IMAGE,
+    KIND_TABLE,
+    Bullet,
+    Content,
+)
 from .style import Style, inches_to_pt
 
 #: 表の 1 行の高さと、上下の余白(inch)。
@@ -121,7 +129,24 @@ def content_height(content: Content, style: Style, width: float) -> float:
         lines = content.code.split("\n")
         height = len(lines) * style.line_height_pt(style.code_size, style.code_line_spacing) / 72.0
         return max(CODE_MIN_HEIGHT, height + CODE_PADDING)
+    if content.kind == KIND_DIAGRAM:
+        return diagram_height(content, style)
     return bullets_height(content.bullets, style, inches_to_pt(width)) / 72.0
+
+
+def diagram_height(content: Content, style: Style) -> float:
+    """図解が本来必要とする高さ(inch)。描画側と同じ数え方をする。"""
+    count = len(content.diagram_items)
+    if count == 0:
+        return 0.0
+    items = count * style.diagram_item_height
+    if content.diagram_shape == DIAGRAM_FRAME:
+        return (
+            items
+            + (count - 1) * style.diagram_item_gap
+            + 2 * style.diagram_frame_padding
+        )
+    return items + (count - 1) * style.diagram_arrow_height
 
 
 def image_height(content: Content, width: float) -> float:
