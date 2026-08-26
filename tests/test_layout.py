@@ -7,7 +7,16 @@
 from __future__ import annotations
 
 from note2slides import layout
-from note2slides.model import KIND_BULLETS, KIND_CODE, KIND_IMAGE, Bullet, Content, Run
+from note2slides.model import (
+    DIAGRAM_FLOW,
+    KIND_BULLETS,
+    KIND_CODE,
+    KIND_DIAGRAM,
+    KIND_IMAGE,
+    Bullet,
+    Content,
+    Run,
+)
 from note2slides.style import Style
 
 STYLE = Style()
@@ -22,6 +31,14 @@ def text_part(lines: int = 1) -> Content:
 
 def image_part(path: str = "") -> Content:
     return Content(kind=KIND_IMAGE, image_path=path or None)
+
+
+def diagram_part(items: int = 5) -> Content:
+    return Content(
+        kind=KIND_DIAGRAM,
+        diagram_shape=DIAGRAM_FLOW,
+        diagram_items=[f"工程{i}" for i in range(items)],
+    )
 
 
 def fit(parts):
@@ -80,7 +97,35 @@ class TestWhenThereIsNotEnoughRoom:
         placed = fit([text_part(40), image_part()]).parts
 
         assert placed[1].box.height > 0
-        assert placed[1].box.height < box.height * layout.MIN_IMAGE_SHARE
+        assert placed[1].box.height < box.height * layout.MIN_FIGURE_SHARE
+
+    def test_a_diagram_gives_up_its_room_the_same_way_a_figure_does(self):
+        """図解(流れ・枠)も、図と同じく縮めて描かれるので先に譲る。
+
+        renderer は図解を box の高さに合わせて縮める。ここで図解を
+        「縮められないもの」として数えると、代わりに文章が縮み、それでも
+        入りきらずにページ番号の帯へはみ出す。
+        """
+        alone = fit([diagram_part()]).parts[0].box.height
+        text = text_part(6)
+        needed = layout.content_height(text, STYLE, layout.body_box(STYLE).width)
+
+        placed = fit([text, diagram_part()]).parts
+
+        assert placed[1].box.height < alone, "図解が譲ること"
+        assert placed[0].box.height >= needed - 1e-9, "譲るのは図解であって、文章ではない"
+
+    def test_text_next_to_a_diagram_keeps_the_room_it_needs(self):
+        text_alone = fit([text_part(3)]).parts[0]
+        needed = layout.content_height(text_alone.content, STYLE, text_alone.box.width)
+
+        placed = fit([diagram_part(7), text_part(3)]).parts
+
+        assert placed[1].box.height >= needed - 1e-9
+
+    def test_a_diagram_alone_is_never_reported_as_too_much(self):
+        """項目が多い図解は縮めて収まる(多すぎることは別の警告が伝える)。"""
+        assert fit([diagram_part(9)]).fits
 
 
 class TestHeights:

@@ -169,3 +169,38 @@ class TestTitleWrapping:
         assert long_box.height > short_box.height
         # 下端(副題との間)は動かさない。
         assert long_box.top + long_box.height == short_box.top + short_box.height
+
+
+class TestWhatIsWrittenIsWhatAppears:
+    """ひな型のレイアウトが、書いた文字を勝手に変えないこと。
+
+    python-pptx の既定のひな型で章扉に使う `Section Header` は、タイトルに
+    `cap="all"` を持っている。何も書かないとこれが効き、「試験Runner」が
+    「試験RUNNER」として出る。資料の中の文字は正しいままなので、
+    スライド画像を目で見るまで気付かない。
+    """
+
+    def _section_title_run(self, tmp_path, title):
+        deck = Deck(slides=[Slide(kind=KIND_SECTION, title=title)], title="題")
+        path = str(tmp_path / "deck.pptx")
+        render_deck(deck, path, Style())
+        pptx = Presentation(path)
+        for shape in pptx.slides[0].shapes:
+            if shape.has_text_frame and title in shape.text_frame.text:
+                return shape.text_frame.paragraphs[0].runs[0]
+        raise AssertionError("章扉の見出しが見つかりません")
+
+    def test_a_section_title_is_not_turned_into_capitals(self, tmp_path):
+        run = self._section_title_run(tmp_path, "おまけ: 試験Runnerを作るなら")
+
+        assert run._r.get_or_add_rPr().get("cap") == "none"
+
+    def test_the_layout_this_guards_against_really_asks_for_capitals(self, tmp_path):
+        # 守っている相手が実在することの確認。ひな型が変わってこれが通らなくなったら、
+        # 上のテストは何も守っていないことになる。
+        deck = Deck(slides=[Slide(kind=KIND_SECTION, title="見出し")], title="題")
+        path = str(tmp_path / "deck.pptx")
+        render_deck(deck, path, Style())
+
+        layout = Presentation(path).slides[0].slide_layout
+        assert 'cap="all"' in layout.element.xml

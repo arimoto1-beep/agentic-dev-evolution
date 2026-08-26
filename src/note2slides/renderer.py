@@ -522,7 +522,7 @@ class Renderer:
         used = layout_mod.bullets_height(bullets, style, box.width_pt)
         if used > box.height_pt:
             scale = max(0.6, box.height_pt / used)
-            oxml_utils.set_normal_autofit(frame, scale, line_reduction=0.1 * (1 - scale))
+            oxml_utils.shrink_text(frame, scale, line_reduction=0.1 * (1 - scale))
 
     def _apply_bullet(self, paragraph, bullet: Bullet) -> None:
         style = self.style
@@ -581,7 +581,7 @@ class Renderer:
         avail_pt = box.width_pt - 40
         if widest * style.code_size > avail_pt:
             scale = max(0.55, avail_pt / (widest * style.code_size))
-            oxml_utils.set_normal_autofit(frame, scale)
+            oxml_utils.shrink_text(frame, scale)
 
     def _draw_table(self, pptx_slide, content: Content, box: Box, continued: bool) -> None:
         style = self.style
@@ -782,7 +782,7 @@ class Renderer:
             width_pt = metrics.text_width_em(text) * size
             avail = self.style.title_width * 72.0
             if width_pt > avail:
-                oxml_utils.set_normal_autofit(frame, max(0.6, avail / width_pt))
+                oxml_utils.shrink_text(frame, max(0.6, avail / width_pt))
 
     def _write_runs(self, paragraph, runs: List[Run], size: float, color, bold: bool = False) -> None:
         for source in runs:

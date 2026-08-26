@@ -9,6 +9,7 @@ from typing import Optional
 
 from lxml import etree
 from pptx.oxml.ns import qn
+from pptx.util import Pt
 
 # a:pPr の子要素順(ECMA-376 CT_TextParagraphProperties)
 _PPR_SEQ = (
@@ -147,19 +148,48 @@ def add_line_break(paragraph) -> None:
 
 
 def set_run_fonts(run, latin: str, east_asian: str, complex_script: Optional[str] = None) -> None:
-    """欧文・日本語それぞれのフォントを指定する。"""
+    """欧文・日本語それぞれのフォントと、文字の出し方を run 自身に書く。
+
+    ひな型のレイアウトが持っている指定は、何も書かなければそのまま効く。
+    たとえば `Section Header` のタイトルは `cap="all"` を持っていて、
+    **書いた文字と違う文字が出る**(「試験Runner」->「試験RUNNER」)。
+    資料の中身は正しいので、画像を目で見るまで気付かない。
+    ここで `cap="none"` を書いて、書いたとおりの文字が出るようにする。
+    """
     rPr = run._r.get_or_add_rPr()
+    rPr.set("cap", "none")
     _replace(rPr, "a:latin", _RPR_SEQ).set("typeface", latin)
     _replace(rPr, "a:ea", _RPR_SEQ).set("typeface", east_asian)
     _replace(rPr, "a:cs", _RPR_SEQ).set("typeface", complex_script or latin)
 
 
-def set_normal_autofit(text_frame, font_scale: float, line_reduction: float = 0.0) -> None:
-    """テキストがはみ出す場合の保険として縮小率を書き込む。"""
+def shrink_text(text_frame, font_scale: float, line_reduction: float = 0.0) -> None:
+    """はみ出す文字を、実際に小さくする。
+
+    `a:normAutofit` の `fontScale` は「この枠の文字はこの割合で縮めて表示する」
+    という指示で、PowerPoint はこれを守る。**LibreOffice は読み飛ばす。**
+    そのため縮小率を指示として書くと、資料の上では収まっているのに、そこから
+    作るスライド画像と動画でははみ出したまま、という食い違いが起きる
+    (ページ番号の帯に本文が重なる)。しかも資料と画像のどちらが本当かは、
+    両方を開いて見比べるまで分からない。
+
+    ここでは指示を書かず、**文字の大きさそのもの** を書き換える。どの道具で
+    開いても同じ結果になり、収まったかどうかを画像で確かめられる。
+
+    `a:normAutofit` 自体は残す(縮小率は付けない)。あとから PowerPoint で
+    文字を足したときは、そこから先を PowerPoint の自動調整に任せる。
+    """
+    for paragraph in text_frame.paragraphs:
+        spacing = paragraph.line_spacing
+        # 行間は「文字の大きさの何倍」で指定している場合だけ詰める
+        # (pt で指定されている場合は、文字を縮めても詰めない)。
+        if line_reduction and isinstance(spacing, float):
+            paragraph.line_spacing = spacing * (1.0 - line_reduction)
+        if paragraph.space_before is not None:
+            paragraph.space_before = Pt(paragraph.space_before.pt * font_scale)
+        for run in paragraph.runs:
+            if run.font.size is not None:
+                run.font.size = Pt(run.font.size.pt * font_scale)
     bodyPr = text_frame._txBody.bodyPr
     _clear(bodyPr, ("a:noAutofit", "a:normAutofit", "a:spAutoFit"))
-    normAutofit = _replace(bodyPr, "a:normAutofit", _BODYPR_SEQ)
-    # 1000 分率ではなく 100000 分率(92.5% -> "92500")で表す。
-    normAutofit.set("fontScale", str(int(round(font_scale * 100000))))
-    if line_reduction:
-        normAutofit.set("lnSpcReduction", str(int(round(line_reduction * 100000))))
+    _replace(bodyPr, "a:normAutofit", _BODYPR_SEQ)

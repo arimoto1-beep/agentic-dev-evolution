@@ -42,7 +42,7 @@ CODE_MIN_HEIGHT = 0.8
 
 #: 図が使える場所が無くなっても、これだけは残す(画面の高さに対する割合)。
 #: 図が点のように潰れるくらいなら、文章側があふれて警告になるほうがよい。
-MIN_IMAGE_SHARE = 0.25
+MIN_FIGURE_SHARE = 0.25
 
 #: 図の縦横比を読み取れなかった場合に使う比(高さ / 幅)。
 FALLBACK_IMAGE_RATIO = 0.75
@@ -192,13 +192,16 @@ def fit(contents: List[Content], style: Style, box: Box) -> Layout:
     gaps = style.part_gap * (len(contents) - 1)
     avail = max(0.0, box.height - gaps)
     natural = [content_height(c, style, box.width) for c in contents]
-    flexible = [c.kind == KIND_IMAGE for c in contents]
+    # 譲れるのは図(`![](図.png)`)と図解(流れ・枠)。どちらも縦横比のまま
+    # 小さく描けるので、renderer 側も box に合わせて縮める。文章・表・コードは
+    # 縮めると読めなくなるため、譲らない。
+    flexible = [c.kind in (KIND_IMAGE, KIND_DIAGRAM) for c in contents]
 
     fixed_total = sum(h for h, f in zip(natural, flexible) if not f)
     flex_total = sum(h for h, f in zip(natural, flexible) if f)
 
     # 図に残す場所。足りなければ縮めるが、最低限は残す。
-    flex_used = min(flex_total, max(avail - fixed_total, avail * MIN_IMAGE_SHARE))
+    flex_used = min(flex_total, max(avail - fixed_total, avail * MIN_FIGURE_SHARE))
     heights = list(natural)
     if flex_total > flex_used:
         scale = flex_used / flex_total
