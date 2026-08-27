@@ -24,7 +24,9 @@ from note2slides.model import (
     KIND_DIAGRAM,
     SHAPE_DIAGRAM,
     SHAPE_DIAGRAM_ITEM,
+    Bullet,
     Content,
+    Run,
     Deck,
     Slide,
     diagram_shape_of,
@@ -143,23 +145,34 @@ class TestTheEstimateMatchesTheDrawing:
 
     @pytest.mark.parametrize("shape", [DIAGRAM_FLOW, DIAGRAM_FRAME])
     @pytest.mark.parametrize("count", [1, 3, 6])
-    def test_the_drawn_height_stays_inside_the_estimate(self, shape, count, tmp_path):
+    def test_the_drawing_stays_inside_the_place_it_was_given(self, shape, count, tmp_path):
+        """layout が配った場所から、描いた図がはみ出さないこと。
+
+        図解は場所が余っていれば大きく描くので、「見積りと同じ大きさ」では
+        なくなった。守るべきなのは **配られた場所に収まること** で、
+        ここがずれると図が下の中身に重なる(それは画像を見るまで分からない)。
+        """
         style = Style()
         content = Content(
             kind=KIND_DIAGRAM,
             diagram_shape=shape,
             diagram_items=[f"項目{i}" for i in range(count)],
         )
-        estimate = layout.diagram_height(content, style)
-        assert estimate > 0
+        body = layout.body_box(style)
+        assert layout.diagram_height(content, style, body.width) > 0
 
         path = str(tmp_path / "d.pptx")
         render_deck(Deck(slides=[content.as_slide(title="見出し")], title="題"), path, style)
-        shapes = _diagram_shapes(path)
-        outer = [s for s in shapes if _kind(s) == SHAPE_DIAGRAM]
+        outer = [s for s in _diagram_shapes(path) if _kind(s) == SHAPE_DIAGRAM]
         assert len(outer) == 1
-        drawn = outer[0].height / 914400  # EMU -> inch
-        assert drawn == pytest.approx(estimate, abs=0.02)
+        left = outer[0].left / 914400
+        top = outer[0].top / 914400
+        width = outer[0].width / 914400
+        height = outer[0].height / 914400
+        assert left >= body.left - 0.02
+        assert top >= body.top - 0.02
+        assert left + width <= body.left + body.width + 0.02
+        assert top + height <= body.top + body.height + 0.02
 
     def test_a_diagram_is_shrunk_rather_than_overflowing(self, tmp_path):
         """場所が足りないときは小さく描く(下の中身に重ねない)。"""
@@ -221,7 +234,7 @@ class TestTheNarrationGuidesToTheDiagram:
         lines = narration.extract_script(path).segments
         assert len(lines) == 1
         assert lines[0].text.count("画面の図をご覧ください") == 1
-        assert "上から順に、A、B、Cと進みます" in lines[0].text
+        assert "左から順に、A、B、Cと進みます" in lines[0].text  # 3 項目は横に並ぶ
 
     def test_the_items_are_not_read_twice(self, tmp_path):
         """案内文で読んだ項目を、本文としてもう一度読まないこと。
@@ -248,7 +261,7 @@ class TestTheNarrationGuidesToTheDiagram:
             Style(),
         )
         text = narration.extract_script(path).segments[0].text
-        assert "上から順に、A、Bと進みます" in text
+        assert "左から順に、A、Bと進みます" in text  # 短い流れは横に並ぶ
         assert "枠の中には、X、Yが入っています" in text
         assert "A、B、X、Y" not in text
 
@@ -273,3 +286,187 @@ def _diagram_shapes(path: str):
 def _kind(shape) -> str:
     kind, _, _ = parse_shape_name(getattr(shape, "name", ""))
     return kind
+
+
+class TestTheDiagramUsesThePlaceItIsGiven:
+    """図解は絵なので、渡された場所を使う。
+
+    gen28 までは、大きさが **中身の文字の長さだけ** で決まっていた。短い語の
+    流れ図は箱の幅が下限(`diagram_min_width`)に張り付き、画面の左右が大きく
+    空いたまま小さく描かれる。44 枚を通して見ると、どの図解も同じ細い列に
+    見えるのはこれが理由だった。
+
+    ここで確かめるのは 2 つ。
+    * 短い流れは **左から右へ** 並ぶこと(「A から B へ」の自然な読み順)
+    * 場所が余っていれば **大きく** 描くこと(ただし見出しより大きくはしない)
+    """
+
+    def _outer_and_items(self, path):
+        shapes = _diagram_shapes(path)
+        outer = [s for s in shapes if _kind(s) == SHAPE_DIAGRAM][0]
+        items = [
+            s
+            for s in shapes
+            if _kind(s) == SHAPE_DIAGRAM_ITEM and s.has_text_frame and s.text_frame.text
+        ]
+        return outer, items
+
+    def _render(self, tmp_path, content, style=None, parts=None):
+        style = style or Style()
+        path = str(tmp_path / "d.pptx")
+        slide = (
+            Slide(kind="content", title="見出し", parts=parts)
+            if parts
+            else content.as_slide(title="見出し")
+        )
+        render_deck(Deck(slides=[slide], title="題"), path, style)
+        return path
+
+    def test_a_short_flow_is_laid_out_left_to_right(self, tmp_path):
+        content = Content(
+            kind=KIND_DIAGRAM, diagram_shape=DIAGRAM_FLOW, diagram_items=["AI", "MCP", "AWS"]
+        )
+        _, items = self._outer_and_items(self._render(tmp_path, content))
+
+        assert [i.text_frame.text for i in items] == ["AI", "MCP", "AWS"]
+        # 左から右へ。上下は同じ位置に並ぶ。
+        assert items[0].left < items[1].left < items[2].left
+        assert items[0].top == items[1].top == items[2].top
+
+    def test_a_long_flow_stays_stacked(self, tmp_path):
+        """横に並べるのは、そのままの文字で収まるときだけ。
+
+        収まらない長さの項目を無理に横へ並べると、箱の中で文字が折り返され、
+        1 つ 1 つが読めなくなる。それなら縦に積むほうがよい。
+        """
+        items = [
+            "試験データを切り替える",
+            "Step Functionsを実行する",
+            "結果を確認する",
+            "ログを確認する",
+            "試験結果を判定する",
+        ]
+        content = Content(kind=KIND_DIAGRAM, diagram_shape=DIAGRAM_FLOW, diagram_items=items)
+        _, drawn = self._outer_and_items(self._render(tmp_path, content))
+
+        assert [i.text_frame.text for i in drawn] == items
+        assert drawn[0].top < drawn[1].top
+        assert drawn[0].left == drawn[1].left
+
+    def test_a_frame_is_never_laid_out_left_to_right(self, tmp_path):
+        """枠図は「中に何が入っているか」の図で、順番の図ではない。"""
+        content = Content(
+            kind=KIND_DIAGRAM, diagram_shape=DIAGRAM_FRAME, diagram_items=["指示", "会話"]
+        )
+        _, items = self._outer_and_items(self._render(tmp_path, content))
+
+        assert items[0].top < items[1].top
+
+    def test_the_narration_follows_how_it_was_actually_drawn(self, tmp_path):
+        """画面が左から右なら「左から順に」と言うこと。
+
+        画面と言っていることが食い違うと、聞いている側だけが混乱する。
+        向きを決めるのは layout なので、ナレーションはその結果を見る。
+        """
+        across = Content(
+            kind=KIND_DIAGRAM, diagram_shape=DIAGRAM_FLOW, diagram_items=["AI", "MCP", "AWS"]
+        )
+        down = Content(
+            kind=KIND_DIAGRAM,
+            diagram_shape=DIAGRAM_FLOW,
+            diagram_items=[
+                "試験データを切り替える",
+                "Step Functionsを実行する",
+                "結果を確認する",
+                "ログを確認する",
+                "試験結果を判定する",
+            ],
+        )
+        tmp_path.joinpath("a").mkdir()
+        tmp_path.joinpath("b").mkdir()
+        a = narration.extract_script(self._render(tmp_path / "a", across)).segments[0].text
+        b = narration.extract_script(self._render(tmp_path / "b", down)).segments[0].text
+
+        assert "左から順に" in a and "上から順に" not in a
+        assert "上から順に" in b and "左から順に" not in b
+
+    def test_a_diagram_alone_on_a_screen_is_drawn_larger(self, tmp_path):
+        """1 枚を図解だけに使うなら、その場所を使って大きく描く。"""
+        style = Style()
+        content = Content(
+            kind=KIND_DIAGRAM,
+            diagram_shape=DIAGRAM_FLOW,
+            diagram_items=["機械判定", "AIレビュー", "最終判定"],
+        )
+        natural = layout.diagram_geometry(content, style, layout.body_box(style).width)
+        outer, _ = self._outer_and_items(self._render(tmp_path, content, style))
+
+        assert outer.height / 914400 > natural.height * 1.2
+
+    def test_the_diagram_text_never_gets_bigger_than_the_slide_title(self, tmp_path):
+        """図の中の語が、その画面の題より目立つことにならないようにする。"""
+        style = Style()
+        content = Content(
+            kind=KIND_DIAGRAM, diagram_shape=DIAGRAM_FLOW, diagram_items=["A", "B"]
+        )
+        body = layout.body_box(style)
+        geometry = layout.diagram_geometry(content, style, body.width, body.height)
+
+        assert geometry.font_pt <= style.slide_title_size + 0.01
+        assert geometry.font_pt > style.diagram_size  # それでも大きくはなっている
+
+    def test_a_diagram_sharing_the_screen_does_not_take_the_whole_place(self, tmp_path):
+        """文章と並ぶ場合は、渡された高さの中に収まる(下の中身を押し出さない)。"""
+        style = Style()
+        content = Content(
+            kind=KIND_DIAGRAM, diagram_shape=DIAGRAM_FLOW, diagram_items=["AI", "MCP", "AWS"]
+        )
+        text = Content(kind="bullets", bullets=[Bullet(runs=[Run("説明の文です。" * 10)])])
+        path = self._render(tmp_path, content, style, parts=[content, text])
+        outer, _ = self._outer_and_items(path)
+
+        placed = layout.fit([content, text], style, layout.body_box(style))
+        box = placed.parts[0].box
+        assert outer.height / 914400 <= box.height + 0.02
+
+    def test_the_leftover_place_goes_to_the_diagram(self, tmp_path):
+        """図と文章が並ぶ画面で、余った場所は図に渡る。
+
+        gen28 までは最後の中身(この場合は文章)に渡していた。文章は広い箱を
+        もらっても大きくならないので、**余りはどこにも使われず**、図は小さい
+        ままだった。
+        """
+        style = Style()
+        diagram = Content(
+            kind=KIND_DIAGRAM,
+            diagram_shape=DIAGRAM_FLOW,
+            diagram_items=["ローカルへ証跡保存", "機械的な期待値チェック", "AIによる解析"],
+        )
+        text = Content(kind="bullets", bullets=[Bullet(runs=[Run("一行の説明です。")])])
+        body = layout.body_box(style)
+
+        placed = layout.fit([diagram, text], style, body)
+
+        natural = layout.diagram_geometry(diagram, style, body.width).height
+        assert placed.parts[0].box.height > natural * 1.2
+
+    def test_the_last_text_keeps_room_for_one_more_line(self, tmp_path):
+        """全部は渡さない。文章の折り返しが 1 行増えても収まるだけは残す。
+
+        余りを全部図に渡すと、文章がちょうど下端まで来て、ページ番号の帯と
+        同じ高さに並ぶ(gen28 が直したのがこの見え方)。
+        """
+        style = Style()
+        diagram = Content(
+            kind=KIND_DIAGRAM,
+            diagram_shape=DIAGRAM_FLOW,
+            diagram_items=["ローカルへ証跡保存", "機械的な期待値チェック", "AIによる解析"],
+        )
+        text = Content(kind="bullets", bullets=[Bullet(runs=[Run("一行の説明です。")])])
+        body = layout.body_box(style)
+
+        placed = layout.fit([diagram, text], style, body)
+
+        estimate = layout.content_height(text, style, body.width)
+        one_line = style.line_height_pt(style.body_size(0)) / 72.0
+        assert placed.parts[1].box.height >= estimate + one_line - 0.01

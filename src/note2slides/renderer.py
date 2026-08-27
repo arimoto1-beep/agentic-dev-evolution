@@ -19,6 +19,7 @@ from . import layout as layout_mod
 from . import metrics, oxml_utils, text_wrap
 from .layout import Box
 from .model import (
+    DIAGRAM_FLOW_ACROSS,
     DIAGRAM_FRAME,
     KIND_CODE,
     KIND_DIAGRAM,
@@ -628,24 +629,24 @@ class Renderer:
         フォントを前提にしていて、資料 -> PDF -> 画像と変換する間にどこかで
         崩れる。ここでは箱と矢印を図形として置くので、フォントに依存しない。
         """
-        items = [t for t in content.diagram_items if t.strip()]
+        items = layout_mod.diagram_items(content)
         if not items:
             return
         style = self.style
         frame_shape = content.diagram_shape == DIAGRAM_FRAME
 
-        # 必要な高さに対して場所が足りなければ、全体を縮めて収める
-        # (図が下の中身に重なるより、小さく出るほうがよい)。
-        natural = layout_mod.diagram_height(content, style)
-        scale = min(1.0, box.height / natural) if natural > 0 else 1.0
-        item_h = style.diagram_item_height * scale
-        gap = (style.diagram_item_gap if frame_shape else style.diagram_arrow_height) * scale
-        pad = style.diagram_frame_padding * scale
-        font_pt = style.diagram_size * scale
+        # 並べ方も大きさも layout が決める。場所が足りなければ縮み、余っていれば
+        # 見出しの大きさまでは広がる。見積りと描画がずれると図が下の中身に重なり、
+        # それは画像を見るまで分からないので、数え方を 2 か所に置かない。
+        geometry = layout_mod.diagram_geometry(content, style, box.width, box.height)
+        item_h = geometry.item_height
+        gap = geometry.gap
+        pad = geometry.padding
+        font_pt = geometry.font_pt
 
-        inner_w = self._diagram_width(items, font_pt)
-        total_w = inner_w + 2 * pad if frame_shape else inner_w
-        total_h = len(items) * item_h + (len(items) - 1) * gap + (2 * pad if frame_shape else 0)
+        inner_w = geometry.item_width
+        total_w = geometry.width
+        total_h = geometry.height
         left = box.left + (box.width - total_w) / 2
         top = box.top + max(0.0, box.height - total_h) / 2
 
@@ -658,7 +659,12 @@ class Renderer:
             Inches(total_w),
             Inches(total_h),
         )
-        outer.name = shape_name(SHAPE_DIAGRAM, language=content.diagram_shape)
+        # 名前には「どう描いたか」を残す。ナレーションが「上から順に」と
+        # 「左から順に」を選ぶのに使う(model.DIAGRAM_FLOW_ACROSS)。
+        outer.name = shape_name(
+            SHAPE_DIAGRAM,
+            language=DIAGRAM_FLOW_ACROSS if geometry.horizontal else content.diagram_shape,
+        )
         _zero_insets(outer.text_frame)
         if frame_shape:
             # 枠図では、この外枠が図そのもの(何が中に入っているかを示す)。
@@ -670,24 +676,27 @@ class Renderer:
             outer.fill.background()
             _no_outline(outer)
 
-        item_left = left + (pad if frame_shape else 0.0)
-        item_top = top + (pad if frame_shape else 0.0)
+        item_left = left + pad
+        item_top = top + pad
         for index, text in enumerate(items):
             if index > 0:
-                if frame_shape:
+                if geometry.horizontal:
+                    self._draw_diagram_arrow(
+                        pptx_slide, item_left, item_top, inner_w, item_h, gap, horizontal=True
+                    )
+                    item_left += gap
+                elif frame_shape:
                     item_top += gap
                 else:
-                    self._draw_diagram_arrow(pptx_slide, item_left, item_top, inner_w, gap)
+                    self._draw_diagram_arrow(
+                        pptx_slide, item_left, item_top, inner_w, item_h, gap, horizontal=False
+                    )
                     item_top += gap
             self._draw_diagram_item(pptx_slide, text, item_left, item_top, inner_w, item_h, font_pt)
-            item_top += item_h
-
-    def _diagram_width(self, items: List[str], font_pt: float) -> float:
-        """項目の箱の幅(inch)。いちばん長い項目に合わせ、全部を同じ幅にする。"""
-        style = self.style
-        widest = max((metrics.text_width_em(t) for t in items), default=0.0)
-        width = widest * font_pt / 72.0 + 2 * style.diagram_item_padding
-        return min(style.diagram_max_width, max(style.diagram_min_width, width))
+            if geometry.horizontal:
+                item_left += inner_w
+            else:
+                item_top += item_h
 
     def _draw_diagram_item(
         self, pptx_slide, text: str, left: float, top: float, width: float, height: float,
@@ -709,18 +718,35 @@ class Renderer:
         )
 
     def _draw_diagram_arrow(
-        self, pptx_slide, item_left: float, top: float, item_width: float, height: float
+        self,
+        pptx_slide,
+        left: float,
+        top: float,
+        item_width: float,
+        item_height: float,
+        gap: float,
+        horizontal: bool,
     ) -> None:
-        """項目と項目の間に置く下向きの矢印。"""
+        """項目と項目の間に置く矢印。横に並べた流れでは右向きになる。"""
         style = self.style
-        width = min(0.34, height)
-        shape = pptx_slide.shapes.add_shape(
-            MSO_SHAPE.DOWN_ARROW,
-            Inches(item_left + (item_width - width) / 2),
-            Inches(top + height * 0.12),
-            Inches(width),
-            Inches(height * 0.76),
-        )
+        if horizontal:
+            thickness = min(0.34, item_height)
+            shape = pptx_slide.shapes.add_shape(
+                MSO_SHAPE.RIGHT_ARROW,
+                Inches(left + gap * 0.12),
+                Inches(top + (item_height - thickness) / 2),
+                Inches(gap * 0.76),
+                Inches(thickness),
+            )
+        else:
+            thickness = min(0.34, gap)
+            shape = pptx_slide.shapes.add_shape(
+                MSO_SHAPE.DOWN_ARROW,
+                Inches(left + (item_width - thickness) / 2),
+                Inches(top + gap * 0.12),
+                Inches(thickness),
+                Inches(gap * 0.76),
+            )
         shape.name = shape_name(SHAPE_DIAGRAM_ITEM)
         _paint(shape, style.color_accent)
         _no_outline(shape)

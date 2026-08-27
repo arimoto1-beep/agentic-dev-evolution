@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
 from . import narration as narration_mod
+from . import pronunciation as pron_mod
 from . import tts as tts_mod
 from . import waveform as wave_mod
 from .narration import NarrationScript
@@ -179,6 +180,8 @@ class NarrationResult:
     script_path: Optional[str] = None
     workdir: Optional[str] = None  # 調査用に残した作業ディレクトリ
     warnings: List[str] = field(default_factory=list)
+    #: 英字がどう読まれたか(読みを聞けるエンジンの場合だけ)。
+    pronunciation: Optional[pron_mod.PronunciationReport] = None
 
     @property
     def count(self) -> int:
@@ -241,6 +244,9 @@ def export_narration(
                 engine = tts_mod.select_engine(
                     options.engine, powershell, options.language, voicevox_options
                 )
+            # 合成の前に、英字が何と読まれるかを確かめる。音を作らないので速く、
+            # 直す必要があることが「聞く前に」分かる(pronunciation.py)。
+            _check_pronunciation(plans, options, engine, result)
             _synthesize(
                 script, plans, outdir, options, engine, timeout, keep_work, result, on_progress
             )
@@ -264,6 +270,34 @@ def export_narration(
 # ---------------------------------------------------------------------------
 # 合成
 # ---------------------------------------------------------------------------
+
+
+def _check_pronunciation(
+    plans: Dict[int, ReadingPlan],
+    options: AudioOptions,
+    engine,
+    result: NarrationResult,
+) -> None:
+    """英字が 1 文字ずつ読まれていないかを、合成の前に確かめる。
+
+    読みを聞けるのは VOICEVOX だけなので、聞けないエンジンでは何もしない
+    (Windows 標準の音声合成には読みを返す API が無い)。読み違いは音を聞くまで
+    分からないため、分かる範囲だけでも先に知らせる。
+    """
+    read = getattr(engine, "read", None)
+    pick_style = getattr(engine, "pick_style", None)
+    if read is None or pick_style is None:
+        return
+    try:
+        style = pick_style(options.voice)
+        report = pron_mod.inspect_readings(
+            plans, pron_mod.reading_kana_reader(engine, style), lines=False
+        )
+    except Exception as exc:  # 読みの確認は本題ではないので、失敗しても合成は続ける
+        result.warnings.append(f"読み方を確認できませんでした: {exc}")
+        return
+    result.pronunciation = report
+    result.warnings.extend(report.warnings())
 
 
 def _synthesize(
@@ -302,7 +336,9 @@ def _synthesize(
         jobs.append(
             SpeechJob(
                 index=job_index,
-                pieces=[SpeechPiece(u.text, u.pause_after) for u in plan.utterances],
+                # 合成へ渡すのは読み(読み方辞書を当てたあと)。字幕は元の文字を
+                # 使うので、ここだけが `to_speak` になる(`reading.Utterance`)。
+                pieces=[SpeechPiece(u.to_speak, u.pause_after) for u in plan.utterances],
                 out_path=out_path,
                 slide=segment.index,
             )
@@ -524,6 +560,12 @@ def _write_manifest(outdir: str, options: AudioOptions, result: NarrationResult)
         "clips": [clip.to_dict() for clip in result.clips],
         "warnings": result.warnings,
     }
+    if result.pronunciation is not None:
+        # 英字が何と読まれたか。あとから聞き直さずに確かめられるようにする。
+        data["latin_readings"] = [
+            {"surface": w.surface, "kana": w.kana, "slides": w.slides, "spelled": w.spelled}
+            for w in result.pronunciation.words
+        ]
     path = os.path.join(outdir, MANIFEST_NAME)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)

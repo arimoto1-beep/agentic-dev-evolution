@@ -163,8 +163,11 @@ class Style:
     # 図解 (inch)
     #: 項目 1 つの高さ。
     diagram_item_height: float = 0.56
-    #: 流れ図で、項目と項目の間(矢印を置く場所)。
+    #: 流れ図で、項目と項目の間(矢印を置く場所)。縦に積む場合。
     diagram_arrow_height: float = 0.30
+    #: 流れ図で、項目と項目の間(矢印を置く場所)。横に並べる場合。
+    #: 縦より広く取る。横並びでは箱が隣り合うため、間が詰まると 1 つの帯に見える。
+    diagram_arrow_width: float = 0.44
     #: 枠図で、項目と項目の間。
     diagram_item_gap: float = 0.12
     #: 枠図の外枠と、中の項目との間。

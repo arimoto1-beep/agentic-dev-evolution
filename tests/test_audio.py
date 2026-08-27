@@ -783,3 +783,76 @@ def test_waveform_round_trip(tmp_path):
     assert loaded.sample_rate == 48000
     assert loaded.duration == pytest.approx(0.5, abs=0.001)
     assert np.max(np.abs(loaded.samples)) == pytest.approx(TONE_AMPLITUDE, abs=0.01)
+
+
+class TestTheReadingIsCheckedBeforeSynthesis:
+    """英字が 1 文字ずつ読まれていないかを、音声を書き出すときにも知らせる。
+
+    読み違いは音を聞くまで分からない。20 分の動画で 1 語を見つけるには 20 分
+    かかるので、**書き出したときに気付ける** ようにしておく。
+    """
+
+    class ReadingEngine(FakeEngine):
+        """読みを返せるエンジン(VOICEVOX にあたる)。"""
+
+        KANA = {"A": "エイ", "S": "エス", "P": "ピイ", "PASS": "ピイエエエスエス"}
+
+        def pick_style(self, name=None):
+            return "スタイル"
+
+        def read(self, text, style, timeout=60.0):
+            kana = self.KANA.get(text, "ヨミ")
+            return [{"moras": [{"text": c} for c in kana]}]
+
+    def test_a_spelled_out_word_is_reported_as_a_warning(self, tmp_path):
+        script = make_script(tmp_path, ["結果はPASSです。"])
+        engine = self.ReadingEngine()
+
+        result = export_narration(
+            str(script), str(tmp_path / "out"), engine=engine, options=AudioOptions()
+        )
+
+        assert any("1 文字ずつ読まれています" in w and "PASS" in w for w in result.warnings)
+
+    def test_the_readings_are_kept_in_the_manifest(self, tmp_path):
+        """あとから聞き直さずに「何と読まれたか」を確かめられるようにする。"""
+        script = make_script(tmp_path, ["結果はPASSです。"])
+
+        export_narration(
+            str(script),
+            str(tmp_path / "out"),
+            engine=self.ReadingEngine(),
+            options=AudioOptions(),
+        )
+
+        data = json.loads((tmp_path / "out" / "narration.json").read_text(encoding="utf-8"))
+        assert data["latin_readings"] == [
+            {"surface": "PASS", "kana": "ピイエエエスエス", "slides": [1], "spelled": True}
+        ]
+
+    def test_an_engine_that_cannot_be_asked_is_left_alone(self, tmp_path):
+        """Windows 標準の音声合成には読みを返す API が無い。黙って合成する。"""
+        script = make_script(tmp_path, ["結果はPASSです。"])
+
+        result = export_narration(
+            str(script), str(tmp_path / "out"), engine=FakeEngine(), options=AudioOptions()
+        )
+
+        assert result.pronunciation is None
+        assert not any("読ま" in w for w in result.warnings)
+
+    def test_synthesis_still_happens_if_the_check_fails(self, tmp_path):
+        """読みの確認は本題ではない。失敗しても音声は作る。"""
+
+        class Broken(self.ReadingEngine):
+            def read(self, text, style, timeout=60.0):
+                raise RuntimeError("読みを取れません")
+
+        script = make_script(tmp_path, ["結果はPASSです。"])
+
+        result = export_narration(
+            str(script), str(tmp_path / "out"), engine=Broken(), options=AudioOptions()
+        )
+
+        assert result.count == 1
+        assert any("読み方を確認できませんでした" in w for w in result.warnings)

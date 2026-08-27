@@ -15,6 +15,11 @@ def texts(plan):
     return [u.text for u in plan.utterances]
 
 
+def spoken(plan):
+    """合成へ渡す文字列(読み方辞書を当てたあと)。"""
+    return [u.to_speak for u in plan.utterances]
+
+
 def pauses(plan):
     return [round(u.pause_after, 3) for u in plan.utterances]
 
@@ -231,8 +236,30 @@ def test_dictionary_replaces_readings():
 
     plan = plan_reading("note の TTS を使います。", style)
 
-    assert texts(plan) == ["ノートのティーティーエスを使います。"]
+    assert spoken(plan) == ["ノートのティーティーエスを使います。"]
     assert len(plan.notes) == 2
+
+
+def test_the_dictionary_changes_the_reading_but_not_the_words_on_screen():
+    """読みだけを変える。書いてある文字はそのまま残す。
+
+    字幕もページ番号も、この `text` から作られる。読みを直したら字幕まで
+    仮名になった、では直したことにならない(`aws login` -> エーダブリューエスログイン)。
+    """
+    style = ReadingStyle(dictionary={"aws login": "エーダブリューエス ログイン"})
+
+    plan = plan_reading("aws loginで作成されます。", style)
+
+    assert texts(plan) == ["aws loginで作成されます。"]
+    assert spoken(plan) == ["エーダブリューエス ログインで作成されます。"]
+    assert plan.reading == "エーダブリューエス ログインで作成されます。"
+
+
+def test_an_utterance_the_dictionary_did_not_touch_has_no_separate_reading():
+    plan = plan_reading("置き換えるものはありません。", ReadingStyle(dictionary={"AI": "エーアイ"}))
+
+    assert plan.utterances[0].spoken == ""
+    assert plan.utterances[0].to_speak == "置き換えるものはありません。"
 
 
 def test_longer_dictionary_entries_are_applied_first():
@@ -241,7 +268,7 @@ def test_longer_dictionary_entries_are_applied_first():
 
     plan = plan_reading("AIエージェントの話です。", style)
 
-    assert texts(plan) == ["エーアイエージェントの話です。"]
+    assert spoken(plan) == ["エーアイエージェントの話です。"]
 
 
 def test_reading_is_recorded_for_review():

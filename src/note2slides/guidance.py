@@ -28,7 +28,7 @@ from __future__ import annotations
 import re
 from typing import List, Sequence
 
-from .model import DIAGRAM_FRAME
+from .model import DIAGRAM_FLOW_ACROSS, DIAGRAM_FRAME
 
 #: 画面を指す言い方。「続き」は、1 枚に収まらず次のスライドへ分かれた場合。
 TABLE_LEAD = "画面の表をご覧ください。"
@@ -250,7 +250,8 @@ def describe_diagram(shape: str, items: Sequence[str]) -> str:
         return f"{IMAGE_LEAD}枠の中には、{_enumerate(values)}が入っています。"
     if len(values) == 1:
         return f"{IMAGE_LEAD}{values[0]}、という図です。"
-    return f"{IMAGE_LEAD}上から順に、{_enumerate(values)}と進みます。"
+    order = "左から順に" if shape == DIAGRAM_FLOW_ACROSS else "上から順に"
+    return f"{IMAGE_LEAD}{order}、{_enumerate(values)}と進みます。"
 
 
 def hold_for_diagram(items: Sequence[str]) -> float:

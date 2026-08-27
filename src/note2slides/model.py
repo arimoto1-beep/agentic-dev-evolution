@@ -130,6 +130,11 @@ DIAGRAM_FLOW = "flow"
 #: 枠の中に並べる図(何が含まれているか)。
 DIAGRAM_FRAME = "frame"
 DIAGRAM_SHAPES = (DIAGRAM_FLOW, DIAGRAM_FRAME)
+#: 流れを **横に並べて** 描いた場合の目印。シナリオに書ける種類ではなく、
+#: 描き方(場所に収まるかどうかで `layout.diagram_geometry` が決める)。
+#: 図形の名前に残すのは、ナレーションの「上から順に」を「左から順に」に
+#: 合わせるため。画面と言っていることが食い違うと、聞いている側だけが混乱する。
+DIAGRAM_FLOW_ACROSS = "flow-across"
 #: コードブロックの言語名として書く、図解の指定。日本語と英語のどちらでも書ける。
 DIAGRAM_LANGS = {
     "流れ": DIAGRAM_FLOW,

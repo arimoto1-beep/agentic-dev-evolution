@@ -130,23 +130,120 @@ def content_height(content: Content, style: Style, width: float) -> float:
         height = len(lines) * style.line_height_pt(style.code_size, style.code_line_spacing) / 72.0
         return max(CODE_MIN_HEIGHT, height + CODE_PADDING)
     if content.kind == KIND_DIAGRAM:
-        return diagram_height(content, style)
+        return diagram_height(content, style, width)
     return bullets_height(content.bullets, style, inches_to_pt(width)) / 72.0
 
 
-def diagram_height(content: Content, style: Style) -> float:
-    """図解が本来必要とする高さ(inch)。描画側と同じ数え方をする。"""
-    count = len(content.diagram_items)
+@dataclass(frozen=True)
+class DiagramGeometry:
+    """図解の並べ方と大きさ。
+
+    見積り(`layout`)と実際の描画(`renderer`)がずれると、図が下の中身に
+    重なったり、場所が余ったまま小さく描かれたりする。しかもその食い違いは
+    画像を目で見るまで分からない(gen27 / gen28)。そのため **並べ方も大きさも
+    ここだけで決め**、両方が同じ答えを使う。
+    """
+
+    horizontal: bool  # 流れを左から右へ並べるか(縦に積むか)
+    item_width: float  # 項目の箱 1 つの幅(inch)
+    item_height: float  # 項目の箱 1 つの高さ(inch)
+    gap: float  # 項目と項目の間(inch。流れなら矢印の置き場所)
+    padding: float  # 枠図の外枠と中身の間(inch。流れ図では 0)
+    width: float  # 図解全体の幅(inch)
+    height: float  # 図解全体の高さ(inch)
+    font_pt: float  # 項目の文字の大きさ(pt)
+    scale: float  # 基準の大きさに対する倍率
+
+
+def _max_diagram_scale(style: Style) -> float:
+    """図解を大きくしてよい上限(倍率)。
+
+    文字がスライドの見出しより大きくならないところで止める。図の中の語が、
+    その画面の題より目立つことにならないようにするため。
+    """
+    return max(1.0, style.slide_title_size / style.diagram_size)
+
+
+def diagram_geometry(
+    content: Content,
+    style: Style,
+    width: float,
+    height: Optional[float] = None,
+) -> DiagramGeometry:
+    """図解の並べ方と大きさを決める。
+
+    * **流れは、横に並べて収まるなら横に並べる。** 「A から B へ」は左から右へ
+      読むほうが自然で、縦に積むと画面の左右が大きく空く。収まらない長さの
+      ときだけ縦に積む(項目の文字を折り返してまで横には並べない)。
+    * **渡された場所に合わせて拡大・縮小する。** これまでは中身の文字の長さ
+      だけで大きさが決まり、場所が余っていても小さいままだった。図解は絵なので、
+      `![](図.png)` と同じく、渡された場所を使う。
+
+    `height` を渡さない場合は「本来必要な大きさ」(拡大も縮小もしない)を返す。
+    `layout` が場所を配るときに使うのがこちら。
+    """
+    items = diagram_items(content)
+    count = len(items)
     if count == 0:
-        return 0.0
-    items = count * style.diagram_item_height
-    if content.diagram_shape == DIAGRAM_FRAME:
-        return (
-            items
-            + (count - 1) * style.diagram_item_gap
-            + 2 * style.diagram_frame_padding
-        )
-    return items + (count - 1) * style.diagram_arrow_height
+        return DiagramGeometry(False, 0, 0, 0, 0, 0, 0, style.diagram_size, 1.0)
+
+    frame = content.diagram_shape == DIAGRAM_FRAME
+    item_h = style.diagram_item_height
+    pad = style.diagram_frame_padding if frame else 0.0
+
+    horizontal = False
+    if not frame and count > 1:
+        # 横に並べる場合、箱の幅は下限を置かない。下限は「1 つの箱が画面の
+        # 真ん中にぽつんと細く立つ」のを避けるためのもので、横一列なら
+        # 並び全体が広いので細くても間が抜けない。
+        row_item = _item_width(items, style, style.diagram_size, minimum=0.0)
+        row_width = count * row_item + (count - 1) * style.diagram_arrow_width
+        if row_width <= width:
+            horizontal = True
+            item_w = row_item
+            natural_w, natural_h = row_width, item_h
+            gap = style.diagram_arrow_width
+
+    if not horizontal:
+        item_w = _item_width(items, style, style.diagram_size)
+        gap = style.diagram_item_gap if frame else style.diagram_arrow_height
+        natural_w = item_w + 2 * pad
+        natural_h = count * item_h + (count - 1) * gap + 2 * pad
+
+    scale = 1.0
+    if height is not None and natural_w > 0 and natural_h > 0:
+        scale = min(width / natural_w, height / natural_h, _max_diagram_scale(style))
+    return DiagramGeometry(
+        horizontal=horizontal,
+        item_width=item_w * scale,
+        item_height=item_h * scale,
+        gap=gap * scale,
+        padding=pad * scale,
+        width=natural_w * scale,
+        height=natural_h * scale,
+        font_pt=style.diagram_size * scale,
+        scale=scale,
+    )
+
+
+def diagram_items(content: Content) -> List[str]:
+    """図解の項目のうち、実際に箱として描かれるもの(空行は数えない)。"""
+    return [text for text in content.diagram_items if text.strip()]
+
+
+def _item_width(
+    items: List[str], style: Style, font_pt: float, minimum: Optional[float] = None
+) -> float:
+    """項目の箱の幅(inch)。いちばん長い項目に合わせ、全部を同じ幅にする。"""
+    widest = max((metrics.text_width_em(t) for t in items), default=0.0)
+    width = widest * font_pt / 72.0 + 2 * style.diagram_item_padding
+    low = style.diagram_min_width if minimum is None else minimum
+    return min(style.diagram_max_width, max(low, width))
+
+
+def diagram_height(content: Content, style: Style, width: float) -> float:
+    """図解が本来必要とする高さ(inch)。描画側と同じ数え方をする。"""
+    return diagram_geometry(content, style, width).height
 
 
 def image_height(content: Content, width: float) -> float:
@@ -184,6 +281,20 @@ def image_ratio(path: Optional[str]) -> float:
 # ---------------------------------------------------------------------------
 
 
+def _extra_line_height(content: Content, style: Style) -> float:
+    """その中身の「もう 1 行ぶん」の高さ(inch)。
+
+    文章だけが折り返しの見積りに頼っている。表・コード・図は書かれた大きさで
+    描かれるので、余裕を渡しても使い道が無い(0 を返す)。
+    """
+    if content.kind in (KIND_IMAGE, KIND_TABLE, KIND_CODE, KIND_DIAGRAM):
+        return 0.0
+    levels = [b.level for b in content.bullets]
+    if not levels:
+        return 0.0
+    return style.line_height_pt(style.body_size(max(levels))) / 72.0
+
+
 def fit(contents: List[Content], style: Style, box: Box) -> Layout:
     """中身を上から順に縦へ並べ、それぞれの置き場所を決める。"""
     if not contents:
@@ -215,11 +326,27 @@ def fit(contents: List[Content], style: Style, box: Box) -> Layout:
         # 入りきらない。小さく表示して収める(警告は呼び出し側が出す)。
         heights = [h * (avail / needed) for h in heights]
     elif heights:
-        # 余った場所は最後の中身に渡す。文章の高さは折り返しの見積りなので、
-        # 見積りより実際が大きくても収まるようにしておく(下に何も無いので、
-        # 広げても他の中身の位置は動かない。図・表・コードは自分の大きさで
-        # 描かれるため、広い場所を渡しても大きくはならない)。
-        heights[-1] += avail - needed
+        extra = avail - needed
+        growable = [i for i, f in enumerate(flexible) if f]
+        if growable:
+            # 余った場所は、まず **大きく描ける中身**(図・図解)に渡す。図は絵で、
+            # 場所が広ければそのぶん大きく描ける。小さく描いても伝わる内容は
+            # 増えないので、場所が余っているのに小さいままなのは、ただの損。
+            #
+            # ただし全部は渡さない。最後が文章なら、折り返しが 1 行増えても
+            # 収まるだけは残す。文章の高さは見積りなので、余裕を全部取り上げると
+            # 実際が 1 行多かったときに文章が下端まで来て、ページ番号の帯と
+            # 同じ高さに並ぶ(gen28 が直したのがこの見え方)。
+            reserve = min(extra, _extra_line_height(contents[-1], style))
+            for index in growable:
+                heights[index] += (extra - reserve) / len(growable)
+            heights[-1] += reserve
+        else:
+            # 図が無ければ最後の中身に渡す。文章の高さは折り返しの見積りなので、
+            # 見積りより実際が大きくても収まるようにしておく(下に何も無いので、
+            # 広げても他の中身の位置は動かない。表・コードは自分の大きさで
+            # 描かれるため、広い場所を渡しても大きくはならない)。
+            heights[-1] += extra
 
     placed: List[Placed] = []
     top = box.top

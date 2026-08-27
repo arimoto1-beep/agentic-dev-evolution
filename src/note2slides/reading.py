@@ -27,9 +27,14 @@
     * URL を落とす(1 文字ずつ読まれてしまい、聞いても意味が取れない)
     * 日本語の間に入った空白を詰める(下記)
     * 文末に句点が無い行に句点を補う(無いと語尾が上がったまま次の文に続く)
-    * 利用者が指定した読み方辞書で置き換える
 
 「文末に句点を補う」以外は文字を減らすだけで、元の記事に無い内容は足さない。
+
+読み方辞書(`ReadingStyle.dictionary`)は、区切ったあとに区切りごとへ掛ける。
+`Utterance` は「画面に出す文字」と「合成へ渡す文字」を分けて持ち、辞書が変えるのは
+後者だけ。区切る前に掛けると字幕まで書き換わり、`aws login` の読みを直したときに
+**字幕が「エーダブリューエスログイン」になる**(gen29 で実際に起きた)。
+聞く人には読みを、読む人には書いてあるとおりを見せる。
 
 日本語の間の空白を詰めるのは、記事では「1 枚」「30 秒」のように数字と単位の
 間に空白を入れて書くことがあり、合成エンジンがそこを語の切れ目とみなして
@@ -148,10 +153,22 @@ class Utterance:
 
     最後の区切りの `pause_after` は 0 になる(読み終わったあとの無音は
     `ReadingPlan.tail_silence`)。
+
+    `text` は **画面に出す文字**(字幕がこれを使う)、`spoken` は
+    **合成へ渡す文字**。読み方辞書で置き換えた場合だけ 2 つが違う。
+    分けるのは、`aws login` の読みを「エーダブリューエス ログイン」に直したときに、
+    **字幕まで仮名になってしまう** のを避けるため。聞く人には読みを、
+    読む人には書いてあるとおりを見せる。
     """
 
     text: str
     pause_after: float
+    spoken: str = ""
+
+    @property
+    def to_speak(self) -> str:
+        """合成エンジンへ渡す文字列。"""
+        return self.spoken or self.text
 
 
 @dataclass
@@ -175,14 +192,16 @@ class ReadingPlan:
     @property
     def reading(self) -> str:
         """実際に合成へ渡す文字列(確認用に 1 本につなげたもの)。"""
-        return " ".join(u.text for u in self.utterances)
+        return " ".join(u.to_speak for u in self.utterances)
 
     def to_dict(self) -> dict:
         return {
             "lead_silence": round(self.lead_silence, 3),
             "tail_silence": round(self.tail_silence, 3),
             "utterances": [
-                {"text": u.text, "pause_after": round(u.pause_after, 3)} for u in self.utterances
+                {"text": u.text, "pause_after": round(u.pause_after, 3)}
+                | ({"spoken": u.spoken} if u.spoken else {})
+                for u in self.utterances
             ],
             "notes": self.notes,
         }
@@ -227,8 +246,28 @@ def plan_reading(
                 pause = style.sentence_pause
             else:
                 pause = style.clause_pause
-            plan.utterances.append(Utterance(piece, pause))
+            spoken = _apply_dictionary(piece, style, plan.notes)
+            plan.utterances.append(Utterance(piece, pause, spoken if spoken != piece else ""))
     return plan
+
+
+def _apply_dictionary(text: str, style: ReadingStyle, notes: List[str]) -> str:
+    """読み方辞書で読みを置き換える(合成へ渡す文字だけを書き換える)。
+
+    区切ったあとに掛けるのは、**画面に出す文字を残したまま** 読みだけを
+    変えるため。区切る前に掛けると、字幕もページ番号も仮名になってしまう
+    (`aws login` の読みを直したら字幕が「エーダブリューエスログイン」になる)。
+
+    長い表記から先に置き換える(`load_dictionary` が長さ順に並べてある)ので、
+    `Execution` と `GetExecutionHistory` を両方書いても混ざらない。
+    """
+    for surface, reading in style.dictionary.items():
+        if surface and surface in text:
+            text = text.replace(surface, reading)
+            note = f"読み方辞書で置き換えました: {surface} -> {reading}"
+            if note not in notes:
+                notes.append(note)
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -251,11 +290,6 @@ def _normalize(text: str, style: ReadingStyle) -> tuple[List[str], List[str]]:
     if _PICTOGRAPH.search(normalized):
         normalized = _PICTOGRAPH.sub(" ", normalized)
         notes.append("絵文字・記号は読み上げから外しました。")
-
-    for surface, reading in style.dictionary.items():
-        if surface and surface in normalized:
-            normalized = normalized.replace(surface, reading)
-            notes.append(f"読み方辞書で置き換えました: {surface} -> {reading}")
 
     lines: List[str] = []
     for raw in normalized.split("\n"):
