@@ -20,6 +20,7 @@ from . import metrics, oxml_utils, text_wrap
 from .layout import Box
 from .model import (
     DIAGRAM_BOUNDARY,
+    DIAGRAM_LANES,
     DIAGRAM_FLOW_ACROSS,
     DIAGRAM_FRAME,
     KIND_CODE,
@@ -43,6 +44,7 @@ from .model import (
     Run,
     Slide,
     boundary_parts,
+    lane_parts,
     shape_name,
 )
 from .style import SLIDE_HEIGHT_EMU, SLIDE_WIDTH_EMU, Style, inches_to_pt
@@ -728,6 +730,12 @@ class Renderer:
             _no_outline(outer)
             self._draw_boundary(pptx_slide, content, geometry, left, top)
             return
+        if content.diagram_shape == DIAGRAM_LANES:
+            # レーン図も同じ。主役は列を分ける縦線で、外枠を描くと 2 本になる。
+            outer.fill.background()
+            _no_outline(outer)
+            self._draw_lanes(pptx_slide, content, geometry, left, top)
+            return
         if frame_shape:
             # 枠図では、この外枠が図そのもの(何が中に入っているかを示す)。
             _paint(outer, style.color_code_bg)
@@ -767,8 +775,8 @@ class Renderer:
 
         線は図全体の幅いっぱいに引く(箱より広い)。線が箱の幅で止まると、
         「箱と箱の区切り」に見えて、越える・越えないの話に見えない。
-        またぐものの札は地を白で塗り、線の上に載せる。線が札のところで途切れ、
-        **そこだけが通り道** に見える。
+        またぐものの札は線の上に載せず、**線を挟んでどちら側に置くか** で
+        向きを表す(`_draw_boundary_crossings`)。線を 1 本のまま残すため。
         """
         style = self.style
         lines = [text for text in content.diagram_items if text.strip()]
@@ -869,15 +877,233 @@ class Renderer:
                 align=PP_ALIGN.LEFT,
             )
 
+    # -- レーン図 --------------------------------------------------------
+    #: レーン図の図形に付ける名前。narration が案内文を組み立て直すときに読む。
+    LANE_HEAD = "lane-head"
+    LANE_COLUMNS = ("lane-a", "lane-b")
+
+    def _draw_lanes(
+        self, pptx_slide, content: Content, geometry, left: float, top: float
+    ) -> None:
+        """レーン図を描く。左右 2 列、上から下へ 1 手順 1 行。
+
+        **1 行に置く箱は 1 つだけ** で、反対の列のその行は必ず空く。だから
+        レーンをまたぐ矢印も、戻りの横棒も、箱の上を通らない(空いている
+        ところだけを通る)。行を詰めて 2 つ置くと、この前提が崩れる。
+        """
+        parts = lane_parts(content.diagram_items)
+        if not parts.steps or len(parts.lanes) < 2:
+            return
+        style = self.style
+        item_w = geometry.item_width
+        item_h = geometry.item_height
+        gap = geometry.gap
+        gutter = geometry.gutter
+
+        cols_left = left + (geometry.ret_band if geometry.ret_left else 0.0)
+        col_x = (cols_left, cols_left + item_w + gutter)
+        rows_top = top + geometry.header
+
+        def row_top(index: int) -> float:
+            return rows_top + index * (item_h + gap)
+
+        # 列を分ける縦線。境界図の線と同じ意味を持つので、同じ太さで引く。
+        # レーン名の帯も貫かせる(名前のところで途切れると、線が「箱の区切り」
+        # に見えて、担当の分かれ目に見えない)。
+        thickness = max(0.02, style.diagram_lane_rule * geometry.scale)
+        rule = pptx_slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            Inches(cols_left + item_w + (gutter - thickness) / 2),
+            Inches(top),
+            Inches(thickness),
+            Inches(geometry.height),
+        )
+        rule.name = shape_name(SHAPE_DIAGRAM_ITEM)
+        _paint(rule, style.color_accent)
+        _no_outline(rule)
+
+        self._draw_lane_headers(pptx_slide, parts, geometry, col_x, top)
+
+        for index, step in enumerate(parts.steps):
+            column = parts.lanes.index(step.lane)
+            if index > 0:
+                self._draw_lane_arrow(
+                    pptx_slide, parts, geometry, col_x, index, row_top(index) - gap
+                )
+            self._draw_diagram_item(
+                pptx_slide,
+                step.text,
+                col_x[column],
+                row_top(index),
+                item_w,
+                item_h,
+                geometry.font_pt,
+                language=self.LANE_COLUMNS[column],
+            )
+            # 戻りは、出ていく手順のすぐ後ろに置く。**図形の並び順が
+            # シナリオの行の順** になっていないと、資料を読み直して案内文を
+            # 組み立てるとき(narration)に、戻りがどの手順から出たのかが
+            # 分からなくなる(最後の手順から出たことにされる)。
+            for ret in parts.returns:
+                if ret.after == index:
+                    self._draw_lane_return(
+                        pptx_slide, parts, geometry, ret, col_x, left, row_top
+                    )
+
+    def _draw_lane_headers(self, pptx_slide, parts, geometry, col_x, top: float) -> None:
+        """レーン名の帯。**誰の列か** は、図の中でいちばん先に読まれる。"""
+        style = self.style
+        height = geometry.header * 0.78
+        for column, lane in enumerate(parts.lanes[:2]):
+            shape = pptx_slide.shapes.add_shape(
+                MSO_SHAPE.ROUNDED_RECTANGLE,
+                Inches(col_x[column]),
+                Inches(top),
+                Inches(geometry.item_width),
+                Inches(height),
+            )
+            shape.name = shape_name(SHAPE_DIAGRAM_ITEM, language=self.LANE_HEAD)
+            _paint(shape, style.color_accent)
+            _no_outline(shape)
+            self._fill_text(
+                shape.text_frame,
+                [[Run(lane)]],
+                size=geometry.font_pt * style.diagram_crossing_ratio,
+                color=(0xFF, 0xFF, 0xFF),
+                bold=True,
+                align=PP_ALIGN.CENTER,
+                anchor=MSO_ANCHOR.MIDDLE,
+            )
+
+    def _draw_lane_arrow(
+        self, pptx_slide, parts, geometry, col_x, index: int, band_top: float
+    ) -> None:
+        """手順から次の手順へ引く矢印。
+
+        同じレーンなら下向き。レーンが変わるところでは、**縦線をまたぐ横向き**
+        にする。担当が移ったことは、矢印が線を越えることでしか見えない。
+        """
+        style = self.style
+        before = parts.lanes.index(parts.steps[index - 1].lane)
+        after = parts.lanes.index(parts.steps[index].lane)
+        if before == after:
+            self._draw_diagram_arrow(
+                pptx_slide,
+                col_x[before],
+                band_top,
+                geometry.item_width,
+                geometry.item_height,
+                geometry.gap,
+                horizontal=False,
+            )
+            return
+        # 列の中央から中央まで引く。列の縁から縁までだと、線をまたいだことは
+        # 見えても、どの箱からどの箱へ移ったのかが見えない。
+        thickness = min(0.30 * geometry.scale, geometry.gap * 0.72)
+        start = col_x[before] + geometry.item_width / 2
+        end = col_x[after] + geometry.item_width / 2
+        shape = pptx_slide.shapes.add_shape(
+            MSO_SHAPE.RIGHT_ARROW if after > before else MSO_SHAPE.LEFT_ARROW,
+            Inches(min(start, end)),
+            Inches(band_top + (geometry.gap - thickness) / 2),
+            Inches(abs(end - start)),
+            Inches(thickness),
+        )
+        shape.name = shape_name(SHAPE_DIAGRAM_ITEM)
+        _paint(shape, style.color_accent)
+        _no_outline(shape)
+
+    def _draw_lane_return(
+        self, pptx_slide, parts, geometry, ret, col_x, left: float, row_top
+    ) -> None:
+        """戻りの矢印。手順の箱を避けて、外側の帯を通って戻り先の行まで上がる。
+
+        横棒 → 縦棒 → 矢じり の 3 つで組む。縦棒の先に矢じりを付けると、
+        矢が上を向いたまま終わり、**どの箱へ戻るのか** が示されない。
+        """
+        style = self.style
+        if not (0 <= ret.after < len(parts.steps)):
+            return
+        source = parts.steps[ret.after]
+        target_lane = parts.lanes[1] if source.lane == parts.lanes[0] else parts.lanes[0]
+        target = next((i for i, s in enumerate(parts.steps) if s.lane == target_lane), None)
+        if target is None:
+            return
+        src_col = parts.lanes.index(source.lane)
+        tgt_col = parts.lanes.index(target_lane)
+        item_w = geometry.item_width
+        half = geometry.item_height / 2
+        y_from = row_top(ret.after) + half
+        y_to = row_top(target) + half
+        stem = max(0.02, 0.1 * geometry.scale)
+        head = max(0.1, style.diagram_crossing_arrow * geometry.scale)
+
+        if geometry.ret_left:
+            stem_x = left + geometry.ret_band * 0.76
+            src_edge, tgt_edge = col_x[src_col], col_x[tgt_col]
+            label_left, label_width = left, geometry.ret_band * style.diagram_lane_label_ratio
+        else:
+            stem_x = left + geometry.width - geometry.ret_band * 0.76
+            src_edge = col_x[src_col] + item_w
+            tgt_edge = col_x[tgt_col] + item_w
+            label_left = stem_x + head
+            label_width = geometry.ret_band * style.diagram_lane_label_ratio
+
+        def bar(x, y, w, h, kind=MSO_SHAPE.RECTANGLE):
+            piece = pptx_slide.shapes.add_shape(
+                kind, Inches(x), Inches(y), Inches(w), Inches(h)
+            )
+            piece.name = shape_name(SHAPE_DIAGRAM_ITEM)
+            _paint(piece, style.color_accent)
+            _no_outline(piece)
+
+        # 出るところ: 手順の箱から帯まで。反対の列のこの行は空いているので、
+        # 横棒は箱の上を通らない(1 行 1 箱だから成り立つ)。
+        bar(min(stem_x, src_edge), y_from - stem / 2, abs(src_edge - stem_x), stem)
+        # 上がるところ。
+        bar(stem_x - stem / 2, y_to, stem, max(stem, y_from - y_to))
+        # 戻り先へ入るところ。ここだけ矢じりを付ける。
+        bar(
+            min(stem_x, tgt_edge),
+            y_to - head / 2,
+            max(head, abs(tgt_edge - stem_x)),
+            head,
+            MSO_SHAPE.RIGHT_ARROW if geometry.ret_left else MSO_SHAPE.LEFT_ARROW,
+        )
+        if not ret.label:
+            return
+        # 札は帯の中で折り返す。戻る理由は文になりがちで、1 行で置くと
+        # 図が横に伸びきる(境界図の札と違い、ここは縦に置き場所がある)。
+        label = pptx_slide.shapes.add_textbox(
+            Inches(label_left),
+            Inches(y_to),
+            Inches(max(0.4, label_width)),
+            Inches(max(0.3, y_from - y_to)),
+        )
+        label.name = shape_name(SHAPE_DIAGRAM_ITEM, language="up")
+        frame = label.text_frame
+        frame.word_wrap = True
+        _zero_insets(frame)
+        self._fill_text(
+            frame,
+            [[Run(ret.label)]],
+            size=geometry.font_pt * style.diagram_crossing_ratio,
+            color=style.color_accent,
+            align=PP_ALIGN.CENTER,
+            anchor=MSO_ANCHOR.MIDDLE,
+        )
+
     def _draw_diagram_item(
         self, pptx_slide, text: str, left: float, top: float, width: float, height: float,
-        font_pt: float,
+        font_pt: float, language: str = "",
     ) -> None:
         style = self.style
         shape = pptx_slide.shapes.add_shape(
             MSO_SHAPE.ROUNDED_RECTANGLE, Inches(left), Inches(top), Inches(width), Inches(height)
         )
-        shape.name = shape_name(SHAPE_DIAGRAM_ITEM)
+        # レーン図では、どちらの列の箱かを名前に残す(narration が案内文を
+        # 組み立て直すときに、レーン名と手順を結び直すために読む)。
+        shape.name = shape_name(SHAPE_DIAGRAM_ITEM, language=language)
         _paint(shape, (0xFF, 0xFF, 0xFF))
         _outline(shape, style.color_accent, 1.25)
         frame = shape.text_frame

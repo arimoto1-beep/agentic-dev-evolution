@@ -133,7 +133,11 @@ DIAGRAM_FRAME = "frame"
 #: 流れ・枠と違って「何が線を越えるか」を書けるのが要で、越えるものを書けないなら
 #: 枠 2 つで足りる。
 DIAGRAM_BOUNDARY = "boundary"
-DIAGRAM_SHAPES = (DIAGRAM_FLOW, DIAGRAM_FRAME, DIAGRAM_BOUNDARY)
+#: 2 つのレーン(誰が受け持つか)を縦線で分け、時間を上から下へ流す図。
+#: 流れ・枠・境界のどれでも書けないのは「順番と担当を同時に言う」ことで、
+#: 担当が変わるところで矢印が線をまたぐ。全体像の 1 枚に使う。
+DIAGRAM_LANES = "lanes"
+DIAGRAM_SHAPES = (DIAGRAM_FLOW, DIAGRAM_FRAME, DIAGRAM_BOUNDARY, DIAGRAM_LANES)
 #: 境界図で「線をまたぐもの」を書くときに行の先頭に置く印。上から下へ渡るものが
 #: `↓`、下から上へ戻るものが `↑`。シナリオに書く印と、資料に残す印と、
 #: 案内文が読み取る印を同じにしておく(3 か所で別々の書き方をすると、
@@ -154,7 +158,14 @@ DIAGRAM_LANGS = {
     "frame": DIAGRAM_FRAME,
     "境界": DIAGRAM_BOUNDARY,
     "boundary": DIAGRAM_BOUNDARY,
+    "レーン": DIAGRAM_LANES,
+    "lanes": DIAGRAM_LANES,
 }
+
+#: レーン図で「誰が」と「何を」を分ける印。全角と半角のどちらでも書ける
+#: (日本語で書いていると、コロンだけ半角にするのは間違えやすい)。
+#: 最初に出てきた 1 つで切るので、項目の文にコロンがあっても構わない。
+LANE_SEPARATORS = ("：", ":")
 
 
 def diagram_shape_of(lang: str) -> Optional[str]:
@@ -216,6 +227,89 @@ def boundary_parts(items: List[str]) -> "BoundaryParts":
             continue
         (upper if not crossings else lower).append(line)
     return BoundaryParts(upper=upper, crossings=crossings, lower=lower, split=split)
+
+
+@dataclass(frozen=True)
+class LaneStep:
+    """レーン図の 1 手順。`lane` が受け持つ側の名前、`text` が箱に出る文字。"""
+
+    lane: str
+    text: str
+
+
+@dataclass(frozen=True)
+class LaneReturn:
+    """レーン図の戻り。`after` 番目の手順から、反対のレーンの先頭へ戻る。"""
+
+    after: int
+    label: str
+
+
+@dataclass(frozen=True)
+class LaneParts:
+    """レーン図の行を、レーン名・手順・戻りに分けたもの。
+
+    `bad` と `forward` は書き方の誤り(呼び出し側がエラーにする)。ここでは
+    落とさずに残す —— どの行が悪いのかを、そのまま人に見せられるようにする。
+    """
+
+    lanes: List[str]
+    steps: List["LaneStep"]
+    returns: List["LaneReturn"]
+    #: レーン名が書かれていない行(`:` が無い)。
+    bad: List[str] = field(default_factory=list)
+    #: `↓` で始まる行。レーン図では前へ進む矢印は自動で引かれるので、書けない。
+    forward: List[str] = field(default_factory=list)
+
+
+def lane_parts(items: List[str]) -> "LaneParts":
+    """レーン図の行を読み取る。
+
+    1 行は `レーン名: 手順` で、レーン名は **出てきた順** に左・右となる
+    (どちらを左に置くかを別に書かせない。先に書いたものが先に読まれる)。
+
+    `↑ ラベル` の行は戻りで、**その行の直前の手順から、反対のレーンの
+    先頭の手順へ** 戻る矢印になる。位置が意味を持つのは境界図の `↓` `↑` と
+    同じ考え方で、区切りの記号を別に決めない。
+    """
+    lanes: List[str] = []
+    steps: List[LaneStep] = []
+    returns: List[LaneReturn] = []
+    bad: List[str] = []
+    forward: List[str] = []
+    for line in items:
+        text = line.strip()
+        if not text:
+            continue
+        if text.startswith(CROSSING_DOWN):
+            forward.append(text)
+            continue
+        if text.startswith(CROSSING_UP):
+            returns.append(LaneReturn(after=len(steps) - 1, label=text[len(CROSSING_UP) :].strip()))
+            continue
+        lane, body = _split_lane(text)
+        if lane is None:
+            bad.append(text)
+            continue
+        if lane not in lanes:
+            lanes.append(lane)
+        steps.append(LaneStep(lane=lane, text=body))
+    return LaneParts(lanes=lanes, steps=steps, returns=returns, bad=bad, forward=forward)
+
+
+def _split_lane(text: str) -> Tuple[Optional[str], str]:
+    """`レーン名: 手順` を分ける。最初に見つかったコロンで切る。"""
+    positions = [text.find(mark) for mark in LANE_SEPARATORS]
+    positions = [i for i in positions if i > 0]
+    if not positions:
+        return None, text
+    cut = min(positions)
+    return text[:cut].strip(), text[cut + 1 :].strip()
+
+
+def lane_index(parts: "LaneParts", lane: str) -> int:
+    """そのレーンが左(0)か右(1)か。"""
+    return parts.lanes.index(lane) if lane in parts.lanes else 0
 
 BULLET = "bullet"
 NUMBER = "number"

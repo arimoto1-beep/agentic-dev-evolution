@@ -60,7 +60,9 @@ from .model import (
     SlideBreak,
     Table,
     DIAGRAM_BOUNDARY,
+    DIAGRAM_LANES,
     boundary_parts,
+    lane_parts,
     diagram_shape_of,
 )
 from .style import Style
@@ -660,6 +662,8 @@ def _diagram_part(
         )
     if shape == DIAGRAM_BOUNDARY:
         _check_boundary(scenario, source, items)
+    if shape == DIAGRAM_LANES:
+        _check_lanes(scenario, source, items)
     return Content(kind=KIND_DIAGRAM, diagram_shape=shape, diagram_items=items)
 
 
@@ -690,6 +694,46 @@ def _check_boundary(scenario: Scenario, source: ScenarioSlide, items: List[str])
             f"{where}: 境界図の、線の{'上' if not parts.upper else '下'}に何もありません。\n"
             "  ↓ ↑ の行の前と後ろに、それぞれ 1 つ以上書いてください。"
         )
+
+
+def _check_lanes(scenario: Scenario, source: ScenarioSlide, items: List[str]) -> None:
+    """レーン図の書き方を確かめる。
+
+    境界図と同じ考え方で、**図が決まらない書き方は資料にする前に止める。**
+    レーンが 1 つしかない図は流れ図と同じもので、レーンが 3 つ以上ある図は
+    描き方が決まっていない。どちらも黙って描くと、担当の分かれ目が無い
+    「ただの流れ」が全体像として出てしまい、画像を見るまで気付けない。
+    """
+    parts = lane_parts(items)
+    where = _where(scenario, source)
+    if parts.bad:
+        raise ScenarioError(
+            f"{where}: レーン図に、誰の手順か書かれていない行があります。\n"
+            f"  {parts.bad[0]}\n"
+            "  1 行を「レーン名: 手順」の形で書いてください。\n"
+            "  例: 人間が決める: 仕様を承認する"
+        )
+    if parts.forward:
+        raise ScenarioError(
+            f"{where}: レーン図に ↓ の行があります。\n"
+            f"  {parts.forward[0]}\n"
+            "  前へ進む矢印は、書いた順から自動で引かれます。"
+            "書けるのは ↑(戻り)だけです。"
+        )
+    if len(parts.lanes) != 2:
+        found = "、".join(parts.lanes) if parts.lanes else "なし"
+        raise ScenarioError(
+            f"{where}: レーン図のレーンが {len(parts.lanes)} つあります（{found}）。\n"
+            "  レーンはちょうど 2 つにしてください"
+            "（1 つなら流れ図と同じもので、3 つ以上は 1 枚に収まりません）。"
+        )
+    for ret in parts.returns:
+        if ret.after < 0:
+            raise ScenarioError(
+                f"{where}: レーン図の ↑ の行が、手順より前にあります。\n"
+                f"  ↑ {ret.label}\n"
+                "  戻りは「どの手順から戻るか」なので、その手順の次の行に書いてください。"
+            )
 
 
 def _text_part(texts: List[object]) -> Content:

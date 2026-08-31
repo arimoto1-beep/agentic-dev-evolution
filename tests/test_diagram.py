@@ -21,6 +21,7 @@ from note2slides import guidance, layout, narration
 from note2slides.model import (
     DIAGRAM_BOUNDARY,
     DIAGRAM_FLOW,
+    DIAGRAM_LANES,
     DIAGRAM_FRAME,
     KIND_DIAGRAM,
     SHAPE_DIAGRAM,
@@ -32,6 +33,7 @@ from note2slides.model import (
     Slide,
     boundary_parts,
     diagram_shape_of,
+    lane_parts,
     parse_shape_name,
 )
 from note2slides.renderer import render_deck
@@ -652,3 +654,257 @@ def _boundary_shapes(path: str):
         else:
             crossings.append(shape)
     return rule, boxes, crossings
+
+
+LANES = (
+    "```レーン\n"
+    "人間が決める: 仕様を決めて、承認する\n"
+    "AIが作る: 設計する\n"
+    "AIが作る: 実装とテストを書く\n"
+    "↑ AIだけで決められないこと\n"
+    "人間が決める: 受け入れを判断する\n"
+    "```"
+)
+
+
+class TestTheLanesDiagram:
+    """レーン図。左右 2 列に分け、上から下へ 1 手順ずつ進める。
+
+    流れ・枠・境界のどれでも書けなかったのは **順番と担当を同時に言うこと**
+    だった。流れは順番しか言えず、境界は担当しか言えない。全体像の 1 枚は
+    「誰が、どの順で、どこで戻すのか」を 1 つの絵で言う必要がある。
+
+    ここで確かめたいのは 5 つ。
+
+    * 書いた順が、そのまま上から下の並びになること
+    * 1 行に置く箱が 1 つだけであること(反対の列のその行が空くので、
+      またぐ矢印と戻りの横棒が箱の上を通らない)
+    * 担当が変わるところで、矢印が縦線を **またぐ** こと
+    * 戻りが、**戻り先の箱まで** 届くこと(上を向いたまま終わらない)
+    * 案内文が、担当が変わったときだけレーン名を言うこと
+    """
+
+    @pytest.mark.parametrize("lang", ["レーン", "lanes", "LANES"])
+    def test_a_lanes_block_becomes_a_lanes_diagram(self, lang):
+        assert diagram_shape_of(lang) == DIAGRAM_LANES
+
+    def test_the_lane_names_come_from_the_order_they_appear(self):
+        """どちらを左に置くかを別に書かせない。先に書いたレーンが左。"""
+        parts = lane_parts(["AI: 作る", "人間: 決める", "AI: 直す"])
+        assert parts.lanes == ["AI", "人間"]
+        assert [(s.lane, s.text) for s in parts.steps] == [
+            ("AI", "作る"),
+            ("人間", "決める"),
+            ("AI", "直す"),
+        ]
+
+    @pytest.mark.parametrize("mark", ["：", ":"])
+    def test_the_colon_can_be_full_width_or_half_width(self, mark):
+        """日本語で書いていて、コロンだけ半角にするのは間違えやすい。"""
+        parts = lane_parts([f"人間{mark} 決める", f"AI{mark} 作る"])
+        assert parts.lanes == ["人間", "AI"]
+        assert parts.steps[0].text == "決める"
+
+    def test_a_colon_inside_the_step_is_kept(self):
+        """切るのは最初のコロンだけ。手順の文にコロンがあっても構わない。"""
+        parts = lane_parts(["人間: 決める: そして承認する"])
+        assert parts.steps[0].text == "決める: そして承認する"
+
+    def test_the_return_remembers_which_step_it_leaves_from(self):
+        parts = lane_parts(["人間: 決める", "AI: 作る", "↑ 決められないこと"])
+        assert [(r.after, r.label) for r in parts.returns] == [(1, "決められないこと")]
+
+    def test_the_return_is_not_drawn_as_a_box(self):
+        """戻りは矢印と札になる。箱として数えると場所の見積りがずれる。"""
+        content = Content(
+            kind=KIND_DIAGRAM,
+            diagram_shape=DIAGRAM_LANES,
+            diagram_items=["人間: 決める", "AI: 作る", "↑ 戻す"],
+        )
+        assert layout.diagram_items(content) == ["決める", "作る"]
+
+    @pytest.mark.parametrize(
+        "block, message",
+        [
+            ("```レーン\n人間: 決める\n作る\n```", "誰の手順か書かれていない"),
+            ("```レーン\n人間: 決める\n↓ 仕様\nAI: 作る\n```", "↓ の行があります"),
+            ("```レーン\n人間: 決める\n人間: 承認する\n```", "レーンが 1 つ"),
+            ("```レーン\n人間: 決める\nAI: 作る\n上司: 見る\n```", "レーンが 3 つ"),
+            ("```レーン\n↑ 戻す\n人間: 決める\nAI: 作る\n```", "手順より前"),
+        ],
+    )
+    def test_a_lanes_diagram_that_cannot_be_drawn_is_refused(self, block, message):
+        """図が決まらない書き方は、資料にする前に止める。
+
+        レーンが 1 つの図は流れ図と同じもので、担当の分かれ目が無い。それが
+        「全体像」として資料に出ても、**画像を目で見るまで気付けない**
+        (gen27 以降の前提)。
+        """
+        with pytest.raises(ScenarioError) as error:
+            deck_of(screen(block))
+        assert message in str(error.value)
+
+    def test_one_row_holds_one_box(self, tmp_path):
+        """1 行に置く箱は 1 つだけ。
+
+        これが崩れると、レーンをまたぐ矢印と戻りの横棒が箱の上を通る。
+        図が読めなくなるのは描いてからで、画像を見るまで分からない。
+        """
+        boxes = _lane_boxes(self._render(tmp_path))
+        tops = [shape.top for shape in boxes]
+        assert len(set(tops)) == len(tops), "同じ行に 2 つ以上の箱がある"
+
+    def test_the_lanes_are_split_by_one_line(self, tmp_path):
+        """列を分ける縦線が 1 本あり、左右の箱がその両側に分かれること。"""
+        path = self._render(tmp_path)
+        rule = _lane_rule(path)
+        assert rule is not None, "列を分ける縦線が引かれていない"
+        left, right = _lane_columns(path)
+        assert max(b.left + b.width for b in left) <= rule.left
+        assert min(b.left for b in right) >= rule.left + rule.width
+
+    def test_the_handover_arrow_crosses_the_line(self, tmp_path):
+        """担当が変わるところでは、矢印が縦線をまたぐ。
+
+        またがない矢印は「同じ側で次へ進んだ」だけに見える。担当が移った
+        ことは、線を越えることでしか見えない。
+        """
+        path = self._render(tmp_path)
+        rule = _lane_rule(path)
+        crossing = [
+            s
+            for s in _lane_plain(path)
+            if s.width > s.height
+            and s.left < rule.left
+            and s.left + s.width > rule.left + rule.width
+        ]
+        assert len(crossing) >= 2, "縦線をまたぐ矢印が足りない"
+
+    def test_the_return_reaches_the_box_it_goes_back_to(self, tmp_path):
+        """戻りは、戻り先の箱の高さまで届く。
+
+        縦棒の先で終わると「上へ戻る」としか言えず、**どの箱へ戻るのか**
+        が示されない。
+        """
+        path = self._render(tmp_path)
+        target = min(_lane_boxes(path), key=lambda s: s.top)
+        middle = target.top + target.height / 2
+        slack = 914400 * 0.05
+        reaching = [
+            s
+            for s in _lane_plain(path)
+            # 横に走る棒で、戻り先の箱と同じ高さにあり、箱の縁まで届いているもの。
+            # 縦棒はここに入らない(縦に長い)。またぐ矢印も入らない(行と行の
+            # あいだにあって、箱の高さに掛からない)。
+            if s.width > s.height
+            and s.top <= middle <= s.top + s.height
+            and (
+                abs(s.left + s.width - target.left) < slack
+                or abs(s.left - (target.left + target.width)) < slack
+            )
+        ]
+        assert reaching, "戻りの矢印が、戻り先の箱まで届いていない"
+
+    def test_the_return_label_stays_outside_the_columns(self, tmp_path):
+        """戻りの札は列の外の帯に置く。列に重ねると手順の文字が読めない。"""
+        path = self._render(tmp_path)
+        labels = {language: shape for shape, language in _named_labels(path)}
+        assert "up" in labels, "戻りの札が描かれていない"
+        left, _ = _lane_columns(path)
+        assert labels["up"].left + labels["up"].width <= min(b.left for b in left)
+
+    def test_the_drawing_stays_inside_the_place_it_was_given(self, tmp_path):
+        """描いた図形が、layout が配った場所からはみ出さないこと。"""
+        path = self._render(tmp_path)
+        shapes = _diagram_shapes(path)
+        outer = [s for s in shapes if _kind(s) == SHAPE_DIAGRAM][0]
+        slack = 914400 * 0.02
+        for shape in shapes:
+            if _kind(shape) != SHAPE_DIAGRAM_ITEM:
+                continue
+            assert shape.left >= outer.left - slack
+            assert shape.left + shape.width <= outer.left + outer.width + slack
+            assert shape.top >= outer.top - slack
+            assert shape.top + shape.height <= outer.top + outer.height + slack
+
+    def test_the_narration_names_the_lane_only_when_it_changes(self):
+        """毎回レーン名を言うと、どこで担当が移ったのかが聞き取れない。"""
+        text = guidance.describe_diagram(
+            DIAGRAM_LANES,
+            [
+                "人間が決める: 仕様を決めて、承認する",
+                "AIが作る: 設計する",
+                "AIが作る: 実装とテストを書く",
+                "↑ AIだけで決められないこと",
+                "人間が決める: 受け入れを判断する",
+            ],
+        )
+        assert text == (
+            "画面の図をご覧ください。"
+            "左は人間が決める、右はAIが作るです。"
+            "人間が決める側で、仕様を決めて、承認する。"
+            "AIが作る側で、設計する、実装とテストを書く。"
+            "人間が決める側で、受け入れを判断する。"
+            "人間が決める側へ戻るのは、AIだけで決められないことです。"
+        )
+
+    def test_the_lanes_survive_the_presentation(self, tmp_path):
+        """資料に書き出して読み直しても、どの手順が誰の列だったかが残ること。
+
+        レーン名は **図形の文字** から取る。図形の名前に入れると
+        `parse_shape_name` が小文字にするので、「AI」が「ai」と読まれる。
+        """
+        prs = Presentation(self._render(tmp_path))
+        parts, _ = narration._screen_guidance(prs.slides[0])
+        assert parts, "案内文が作られていない"
+        assert "左は人間が決める、右はAIが作るです。" in parts[0]
+        assert "AIが作る側で、設計する、実装とテストを書く。" in parts[0]
+        assert "人間が決める側へ戻るのは、AIだけで決められないことです。" in parts[0]
+
+    def _render(self, tmp_path) -> str:
+        deck = deck_of(screen(LANES))
+        path = str(tmp_path / "lanes.pptx")
+        render_deck(deck, path, Style())
+        return path
+
+
+def _lane_boxes(path: str):
+    """レーン図の、手順の箱(レーン名の帯と札は含まない)。"""
+    found = []
+    for shape in _diagram_shapes(path):
+        kind, _, language = parse_shape_name(getattr(shape, "name", ""))
+        if kind == SHAPE_DIAGRAM_ITEM and language in ("lane-a", "lane-b"):
+            found.append(shape)
+    return found
+
+
+def _lane_columns(path: str):
+    """手順の箱を、左の列と右の列に分ける。"""
+    left, right = [], []
+    for shape in _diagram_shapes(path):
+        kind, _, language = parse_shape_name(getattr(shape, "name", ""))
+        if kind != SHAPE_DIAGRAM_ITEM:
+            continue
+        if language == "lane-a":
+            left.append(shape)
+        elif language == "lane-b":
+            right.append(shape)
+    return left, right
+
+
+def _lane_plain(path: str):
+    """文字を持たない図形(縦線・矢印・戻りの棒)。"""
+    found = []
+    for shape in _diagram_shapes(path):
+        if _kind(shape) != SHAPE_DIAGRAM_ITEM:
+            continue
+        text = shape.text_frame.text if shape.has_text_frame else ""
+        if not text.strip():
+            found.append(shape)
+    return found
+
+
+def _lane_rule(path: str):
+    """列を分ける縦線。文字を持たず、いちばん背の高い縦長の図形。"""
+    tall = [s for s in _lane_plain(path) if s.height > s.width]
+    return max(tall, key=lambda s: s.height) if tall else None

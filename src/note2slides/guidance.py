@@ -28,7 +28,14 @@ from __future__ import annotations
 import re
 from typing import List, Sequence
 
-from .model import DIAGRAM_BOUNDARY, DIAGRAM_FLOW_ACROSS, DIAGRAM_FRAME, boundary_parts
+from .model import (
+    DIAGRAM_BOUNDARY,
+    DIAGRAM_FLOW_ACROSS,
+    DIAGRAM_FRAME,
+    DIAGRAM_LANES,
+    boundary_parts,
+    lane_parts,
+)
 
 #: 画面を指す言い方。「続き」は、1 枚に収まらず次のスライドへ分かれた場合。
 TABLE_LEAD = "画面の表をご覧ください。"
@@ -248,6 +255,8 @@ def describe_diagram(shape: str, items: Sequence[str]) -> str:
         return ""
     if shape == DIAGRAM_BOUNDARY:
         return _describe_boundary(values)
+    if shape == DIAGRAM_LANES:
+        return _describe_lanes(values)
     if shape == DIAGRAM_FRAME:
         return f"{IMAGE_LEAD}枠の中には、{_enumerate(values)}が入っています。"
     if len(values) == 1:
@@ -276,6 +285,39 @@ def _describe_boundary(values: List[str]) -> str:
         # 下から上へ、B」と読点が続き、どこで向きが変わったか聞き取れない。
         moves = "上から下へ渡るのは" if crossing.down else "下から上へ戻るのは"
         lines.append(f"{moves}、{crossing.label}です。")
+    return IMAGE_LEAD + "".join(lines)
+
+
+def _describe_lanes(values: List[str]) -> str:
+    """レーン図の画面を案内する文。
+
+    表・境界図と同じで、**画面に出ている文字だけ** を読む。ただしレーン図は
+    「どちらの列にあるか」に意味があるので、そこは言い添える(位置は画面から
+    読み取れることで、書いた人にしか言えない内容ではない)。
+
+    レーン名は、**担当が変わったときだけ** 言う。手順ごとに毎回言うと、
+    同じ名前が並んで、どこで担当が移ったのかが聞き取れなくなる。
+    """
+    parts = lane_parts(values)
+    if not parts.steps or len(parts.lanes) < 2:
+        return ""
+    lines = [f"左は{parts.lanes[0]}、右は{parts.lanes[1]}です。"]
+    run: List[str] = []
+    current = ""
+    for step in parts.steps:
+        if step.lane != current:
+            if run:
+                lines.append(f"{current}側で、{_enumerate(run)}。")
+            current, run = step.lane, []
+        run.append(step.text)
+    if run:
+        lines.append(f"{current}側で、{_enumerate(run)}。")
+    for ret in parts.returns:
+        if not ret.label or not (0 <= ret.after < len(parts.steps)):
+            continue
+        source = parts.steps[ret.after].lane
+        target = parts.lanes[1] if source == parts.lanes[0] else parts.lanes[0]
+        lines.append(f"{target}側へ戻るのは、{ret.label}です。")
     return IMAGE_LEAD + "".join(lines)
 
 

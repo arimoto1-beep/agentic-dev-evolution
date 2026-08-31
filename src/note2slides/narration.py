@@ -47,7 +47,15 @@ from .model import (
 )
 
 #: 境界図で線をまたぐものの札に、描画側が付ける名前(renderer._draw_boundary)。
+#: レーン図の戻りの札も `up` を使う(どちらも「戻るもの」で、案内文の側では
+#: 同じ印から読み取る)。
 _CROSSING_BY_NAME = {"down": CROSSING_DOWN, "up": CROSSING_UP}
+
+#: レーン図の図形に、描画側が付ける名前(renderer.PptxRenderer.LANE_*)。
+#: レーン名は **図形の文字** から取る。名前に入れると `parse_shape_name` が
+#: 小文字にするので、「AI」が「ai」になって読み上げられてしまう。
+_LANE_HEAD = "lane-head"
+_LANE_COLUMNS = ("lane-a", "lane-b")
 
 #: 読み上げ元の種別。
 SOURCE_NOTES = "notes"
@@ -438,15 +446,26 @@ def _diagram_items(slide) -> dict:
     """
     found: dict = {}
     current: Optional[List[str]] = None
+    lanes: List[str] = []
     for position, shape in enumerate(slide.shapes):
         kind, _, language = parse_shape_name(getattr(shape, "name", ""))
         if kind == SHAPE_DIAGRAM:
             current = []
+            lanes = []
             found[position] = current
         elif kind == SHAPE_DIAGRAM_ITEM and current is not None:
             text = getattr(shape, "text_frame", None)
             text = text.text.strip() if text is not None else ""
-            if text:
+            if not text:
+                continue
+            if language == _LANE_HEAD:
+                # レーン名の帯は項目ではない。手順にレーン名を結び直すために
+                # 覚えておく(帯は手順より先に描かれる)。
+                lanes.append(text)
+            elif language in _LANE_COLUMNS:
+                lane = _lane_name(lanes, _LANE_COLUMNS.index(language))
+                current.append(f"{lane}: {text}" if lane else text)
+            else:
                 # 境界図で線をまたぐものは、向きが図形の名前に残っている。
                 # 案内文が「上から下へ」「下から上へ」を言い分けられるよう、
                 # シナリオに書いたのと同じ印を戻して渡す(model.CROSSING_MARKS)。
@@ -455,6 +474,11 @@ def _diagram_items(slide) -> dict:
         elif kind not in (SHAPE_DIAGRAM, SHAPE_DIAGRAM_ITEM):
             current = None
     return found
+
+
+def _lane_name(lanes: List[str], column: int) -> str:
+    """レーン図で、その列のレーン名。帯が読めていなければ空にする。"""
+    return lanes[column] if 0 <= column < len(lanes) else ""
 
 
 def _table_cells(table) -> Tuple[List[str], List[List[str]]]:

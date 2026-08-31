@@ -24,6 +24,7 @@ from . import metrics
 from .model import (
     DIAGRAM_BOUNDARY,
     DIAGRAM_FRAME,
+    DIAGRAM_LANES,
     KIND_CODE,
     KIND_DIAGRAM,
     KIND_IMAGE,
@@ -31,6 +32,7 @@ from .model import (
     Bullet,
     Content,
     boundary_parts,
+    lane_parts,
 )
 from .style import Style, inches_to_pt
 
@@ -160,6 +162,10 @@ class DiagramGeometry:
     font_pt: float  # 項目の文字の大きさ(pt)
     scale: float  # 基準の大きさに対する倍率
     band: float = 0.0  # 境界図で、線をまたぐものを置く帯の高さ(inch)
+    header: float = 0.0  # レーン図で、レーン名の帯の高さ(inch)
+    gutter: float = 0.0  # レーン図で、左右のレーンのあいだ(inch)
+    ret_band: float = 0.0  # レーン図で、戻りの矢印と札を置く帯の幅(inch。無ければ 0)
+    ret_left: bool = True  # 戻りの帯を左に置くか(戻り先のレーンの側に置く)
 
 
 def _max_diagram_scale(style: Style) -> float:
@@ -200,6 +206,8 @@ def diagram_geometry(
 
     if content.diagram_shape == DIAGRAM_BOUNDARY:
         return _boundary_geometry(content, style, width, height)
+    if content.diagram_shape == DIAGRAM_LANES:
+        return _lanes_geometry(content, style, width, height)
 
     horizontal = False
     if not frame and count > 1:
@@ -286,15 +294,103 @@ def _boundary_geometry(
     )
 
 
+def _lanes_geometry(
+    content: Content, style: Style, width: float, height: Optional[float]
+) -> DiagramGeometry:
+    """レーン図の並べ方と大きさ。
+
+    左右に 2 列、上から下へ 1 手順 1 行。担当が変わるところで矢印が縦線を
+    またぐので、**行は必ず 1 手順ずつ** 使う(同じレーンの手順をまとめて
+    1 行に詰めると、またぐ位置が決まらない)。
+
+    幅は「戻りの帯 + 列 + 列のあいだ + 列」。戻りが無ければ帯は取らない。
+    """
+    parts = lane_parts(content.diagram_items)
+    steps = parts.steps
+    if not steps:
+        return DiagramGeometry(False, 0, 0, 0, 0, 0, 0, style.diagram_size, 1.0)
+
+    item_h = style.diagram_item_height
+    gap = style.diagram_lane_gap
+    header = style.diagram_lane_header
+    gutter = style.diagram_lane_gutter
+    # 列の幅は、手順の文字とレーン名の両方が入る幅。レーン名は帯に出るので、
+    # 名前のほうが長ければそちらで決まる。
+    item_w = _item_width([s.text for s in steps] + parts.lanes, style, style.diagram_size)
+    ret_band = _return_band(parts, style)
+
+    natural_w = ret_band + item_w * 2 + gutter
+    natural_h = header + len(steps) * item_h + max(0, len(steps) - 1) * gap
+
+    scale = 1.0
+    if height is not None and natural_w > 0 and natural_h > 0:
+        scale = min(width / natural_w, height / natural_h, _max_diagram_scale(style))
+    return DiagramGeometry(
+        horizontal=False,
+        item_width=item_w * scale,
+        item_height=item_h * scale,
+        gap=gap * scale,
+        padding=0.0,
+        width=natural_w * scale,
+        height=natural_h * scale,
+        font_pt=style.diagram_size * scale,
+        scale=scale,
+        header=header * scale,
+        gutter=gutter * scale,
+        ret_band=ret_band * scale,
+        ret_left=_return_goes_left(parts),
+    )
+
+
+#: 戻りの札を 2 行に収めるために、幅の見積りへ足す余裕。
+LABEL_SLACK = 1.15
+
+
+def _return_band(parts, style: Style) -> float:
+    """戻りの札と矢印を置く帯の幅(inch)。戻りが無ければ 0。
+
+    札がおよそ 2 行に収まる幅を取る。狭いと語の途中で改行が入り
+    (「決め / られない」)、広いと左が空いたまま図全体が縮む。
+    """
+    if not parts.returns:
+        return 0.0
+    widest = max((metrics.text_width_em(r.label) for r in parts.returns), default=0.0)
+    # 半分ちょうどに合わせると、実際の字幅がこの見積りより少しでも広い場合に
+    # 3 行目へこぼれ、最後の 1 文字だけが残る。少し余らせて 2 行に収める。
+    line = widest / 2 * LABEL_SLACK * style.diagram_size * style.diagram_crossing_ratio / 72.0
+    band = line / style.diagram_lane_label_ratio
+    return min(style.diagram_lane_return_max, max(style.diagram_lane_return_min, band))
+
+
+def _return_goes_left(parts) -> bool:
+    """戻りの帯を左に置くか。**戻り先のレーンの側** に置く。
+
+    戻り先を挟んで反対側に帯があると、矢印が図全体を横切って手順の箱に
+    重なる。帯を戻り先の外側に出せば、箱の上を通らずに済む。
+    """
+    if not parts.returns or len(parts.lanes) < 2:
+        return True
+    first = parts.steps[0].lane if parts.steps else ""
+    for ret in parts.returns:
+        if 0 <= ret.after < len(parts.steps):
+            source = parts.steps[ret.after].lane
+            target = parts.lanes[1] if source == parts.lanes[0] else parts.lanes[0]
+            return target == parts.lanes[0]
+    return first == parts.lanes[0]
+
+
 def diagram_items(content: Content) -> List[str]:
     """図解の項目のうち、実際に箱として描かれるもの(空行は数えない)。
 
     境界図では、線をまたぐものは箱ではなく矢印と札になるので、ここには入らない。
+    レーン図の戻りも同じ(矢印と札で、箱ではない)。
     """
     items = [text for text in content.diagram_items if text.strip()]
     if content.diagram_shape == DIAGRAM_BOUNDARY:
         parts = boundary_parts(items)
         return parts.upper + parts.lower
+    if content.diagram_shape == DIAGRAM_LANES:
+        return [step.text for step in lane_parts(items).steps]
     return items
 
 
