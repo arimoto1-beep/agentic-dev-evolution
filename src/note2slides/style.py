@@ -178,6 +178,21 @@ class Style:
     #: 画面いっぱいには広げない(図は中央に置くので、幅が揃っていた方が読める)。
     diagram_min_width: float = 3.4
     diagram_max_width: float = 7.6
+    #: 境界図で、線をまたぐものを置く帯の高さ。線はこの帯の中央に引き、
+    #: 矢印は帯いっぱいに立てて線を突き抜けさせる(またいでいることが分かる)。
+    #: 札は線の上下どちらかの半分に入るので、帯は札 1 行の倍を見込む。
+    diagram_boundary_band: float = 1.04
+    #: 境界図で、線が箱より左右へはみ出す長さ。箱の幅ぴったりで止めると
+    #: 「箱と箱をつなぐ線」に見えて、越える・越えないの話に見えない。
+    diagram_boundary_overhang: float = 0.36
+    #: 境界図の線そのものの太さ。項目の箱の輪郭より太くする(この線が図の主役で、
+    #: 箱の輪郭と同じ太さだと、ただの区切りに見える)。
+    diagram_boundary_rule: float = 0.055
+    #: 境界図で、またぐものの矢印の幅。
+    diagram_crossing_arrow: float = 0.26
+    #: 境界図で、またぐものの札の文字の大きさ(項目の文字に対する割合)。
+    #: 線をまたぐものは図の主役ではないので、箱の中の語より小さくする。
+    diagram_crossing_ratio: float = 0.78
 
     def body_size(self, level: int) -> float:
         sizes = self.body_sizes

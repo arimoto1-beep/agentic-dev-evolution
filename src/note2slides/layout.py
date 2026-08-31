@@ -22,6 +22,7 @@ from typing import List, Optional
 
 from . import metrics
 from .model import (
+    DIAGRAM_BOUNDARY,
     DIAGRAM_FRAME,
     KIND_CODE,
     KIND_DIAGRAM,
@@ -29,6 +30,7 @@ from .model import (
     KIND_TABLE,
     Bullet,
     Content,
+    boundary_parts,
 )
 from .style import Style, inches_to_pt
 
@@ -157,6 +159,7 @@ class DiagramGeometry:
     height: float  # 図解全体の高さ(inch)
     font_pt: float  # 項目の文字の大きさ(pt)
     scale: float  # 基準の大きさに対する倍率
+    band: float = 0.0  # 境界図で、線をまたぐものを置く帯の高さ(inch)
 
 
 def _max_diagram_scale(style: Style) -> float:
@@ -195,6 +198,9 @@ def diagram_geometry(
     item_h = style.diagram_item_height
     pad = style.diagram_frame_padding if frame else 0.0
 
+    if content.diagram_shape == DIAGRAM_BOUNDARY:
+        return _boundary_geometry(content, style, width, height)
+
     horizontal = False
     if not frame and count > 1:
         # 横に並べる場合、箱の幅は下限を置かない。下限は「1 つの箱が画面の
@@ -230,9 +236,66 @@ def diagram_geometry(
     )
 
 
+def _boundary_geometry(
+    content: Content, style: Style, width: float, height: Optional[float]
+) -> DiagramGeometry:
+    """境界図の並べ方と大きさ。
+
+    上の箱、線をまたぐものの帯、下の箱を縦に積む。横に並べる形は無い
+    (線を挟んで上下に置くこと自体が図の意味なので、向きは選べない)。
+
+    幅は、箱に入る文字と、帯に並ぶ札の両方から決める。札は線の上に横並びで
+    載るので、札が長いと図全体を広げないと重なる。
+    """
+    parts = boundary_parts(content.diagram_items)
+    upper = [t for t in parts.upper if t.strip()]
+    lower = [t for t in parts.lower if t.strip()]
+    boxes = upper + lower
+    gaps = max(0, len(upper) - 1) + max(0, len(lower) - 1)
+    item_h = style.diagram_item_height
+    gap = style.diagram_item_gap
+    band = style.diagram_boundary_band
+
+    item_w = _item_width(boxes, style, style.diagram_size)
+    crossings = len(parts.crossings)
+    if crossings:
+        # 札 1 つに要る幅(矢印 + 文字 + 左右の余白)を、並ぶ数だけ横に取る。
+        widest = max((metrics.text_width_em(c.label) for c in parts.crossings), default=0.0)
+        label_w = widest * style.diagram_size * style.diagram_crossing_ratio / 72.0
+        need = crossings * (style.diagram_crossing_arrow + label_w + style.diagram_item_gap * 3)
+        item_w = min(style.diagram_max_width, max(item_w, need))
+
+    # 線は箱より左右へはみ出す。図全体の幅にはその分を含める。
+    natural_w = item_w + 2 * style.diagram_boundary_overhang
+    natural_h = len(boxes) * item_h + gaps * gap + band
+
+    scale = 1.0
+    if height is not None and natural_w > 0 and natural_h > 0:
+        scale = min(width / natural_w, height / natural_h, _max_diagram_scale(style))
+    return DiagramGeometry(
+        horizontal=False,
+        item_width=item_w * scale,
+        item_height=item_h * scale,
+        gap=gap * scale,
+        padding=0.0,
+        width=natural_w * scale,
+        height=natural_h * scale,
+        font_pt=style.diagram_size * scale,
+        scale=scale,
+        band=band * scale,
+    )
+
+
 def diagram_items(content: Content) -> List[str]:
-    """図解の項目のうち、実際に箱として描かれるもの(空行は数えない)。"""
-    return [text for text in content.diagram_items if text.strip()]
+    """図解の項目のうち、実際に箱として描かれるもの(空行は数えない)。
+
+    境界図では、線をまたぐものは箱ではなく矢印と札になるので、ここには入らない。
+    """
+    items = [text for text in content.diagram_items if text.strip()]
+    if content.diagram_shape == DIAGRAM_BOUNDARY:
+        parts = boundary_parts(items)
+        return parts.upper + parts.lower
+    return items
 
 
 def _item_width(

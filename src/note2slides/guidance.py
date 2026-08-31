@@ -28,7 +28,7 @@ from __future__ import annotations
 import re
 from typing import List, Sequence
 
-from .model import DIAGRAM_FLOW_ACROSS, DIAGRAM_FRAME
+from .model import DIAGRAM_BOUNDARY, DIAGRAM_FLOW_ACROSS, DIAGRAM_FRAME, boundary_parts
 
 #: 画面を指す言い方。「続き」は、1 枚に収まらず次のスライドへ分かれた場合。
 TABLE_LEAD = "画面の表をご覧ください。"
@@ -246,12 +246,37 @@ def describe_diagram(shape: str, items: Sequence[str]) -> str:
     values = [v for v in values if v]
     if not values:
         return ""
+    if shape == DIAGRAM_BOUNDARY:
+        return _describe_boundary(values)
     if shape == DIAGRAM_FRAME:
         return f"{IMAGE_LEAD}枠の中には、{_enumerate(values)}が入っています。"
     if len(values) == 1:
         return f"{IMAGE_LEAD}{values[0]}、という図です。"
     order = "左から順に" if shape == DIAGRAM_FLOW_ACROSS else "上から順に"
     return f"{IMAGE_LEAD}{order}、{_enumerate(values)}と進みます。"
+
+
+def _describe_boundary(values: List[str]) -> str:
+    """境界図の画面を案内する文。
+
+    表と同じで、**画面に出ている文字だけ** を読む。ただし境界図は上下の位置と
+    矢印の向きにも意味があるので、そこは「線の上」「下から上へ」と言い添える
+    (位置と向きは画面から読み取れることで、書いた人にしか言えない内容ではない)。
+    """
+    parts = boundary_parts(values)
+    lines = []
+    if parts.upper:
+        lines.append(f"線の上は、{_enumerate(parts.upper)}。")
+    if parts.lower:
+        lines.append(f"線の下は、{_enumerate(parts.lower)}。")
+    for crossing in parts.crossings:
+        if not crossing.label:
+            continue
+        # またぐものは 1 つずつ言い切る。1 文にまとめると「上から下へ、A、
+        # 下から上へ、B」と読点が続き、どこで向きが変わったか聞き取れない。
+        moves = "上から下へ渡るのは" if crossing.down else "下から上へ戻るのは"
+        lines.append(f"{moves}、{crossing.label}です。")
+    return IMAGE_LEAD + "".join(lines)
 
 
 def hold_for_diagram(items: Sequence[str]) -> float:

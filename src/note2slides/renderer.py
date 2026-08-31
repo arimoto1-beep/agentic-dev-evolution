@@ -19,6 +19,7 @@ from . import layout as layout_mod
 from . import metrics, oxml_utils, text_wrap
 from .layout import Box
 from .model import (
+    DIAGRAM_BOUNDARY,
     DIAGRAM_FLOW_ACROSS,
     DIAGRAM_FRAME,
     KIND_CODE,
@@ -41,6 +42,7 @@ from .model import (
     Deck,
     Run,
     Slide,
+    boundary_parts,
     shape_name,
 )
 from .style import SLIDE_HEIGHT_EMU, SLIDE_WIDTH_EMU, Style, inches_to_pt
@@ -719,6 +721,13 @@ class Renderer:
             language=DIAGRAM_FLOW_ACROSS if geometry.horizontal else content.diagram_shape,
         )
         _zero_insets(outer.text_frame)
+        if content.diagram_shape == DIAGRAM_BOUNDARY:
+            # 境界図の外枠も、流れ図と同じく目印として置くだけ。図の主役は
+            # 真ん中の線なので、外側にもう 1 つ枠があると線が枠の 1 本に見える。
+            outer.fill.background()
+            _no_outline(outer)
+            self._draw_boundary(pptx_slide, content, geometry, left, top)
+            return
         if frame_shape:
             # 枠図では、この外枠が図そのもの(何が中に入っているかを示す)。
             _paint(outer, style.color_code_bg)
@@ -750,6 +759,115 @@ class Renderer:
                 item_left += inner_w
             else:
                 item_top += item_h
+
+    def _draw_boundary(
+        self, pptx_slide, content: Content, geometry, left: float, top: float
+    ) -> None:
+        """境界図を描く。上の箱、線とそれをまたぐもの、下の箱の順に置く。
+
+        線は図全体の幅いっぱいに引く(箱より広い)。線が箱の幅で止まると、
+        「箱と箱の区切り」に見えて、越える・越えないの話に見えない。
+        またぐものの札は地を白で塗り、線の上に載せる。線が札のところで途切れ、
+        **そこだけが通り道** に見える。
+        """
+        style = self.style
+        lines = [text for text in content.diagram_items if text.strip()]
+        parts = boundary_parts(lines)
+        item_h = geometry.item_height
+        gap = geometry.gap
+        width = geometry.item_width
+        # 箱は線より内側に置く(線だけが左右へはみ出す)。
+        box_left = left + (geometry.width - width) / 2
+
+        y = top
+        for text in [t for t in parts.upper if t.strip()]:
+            self._draw_diagram_item(
+                pptx_slide, text, box_left, y, width, item_h, geometry.font_pt
+            )
+            y += item_h + gap
+        band_top = y - gap if parts.upper else y
+
+        self._draw_boundary_rule(pptx_slide, left, band_top, geometry)
+        self._draw_boundary_crossings(
+            pptx_slide, parts.crossings, box_left, band_top, geometry
+        )
+
+        y = band_top + geometry.band
+        for text in [t for t in parts.lower if t.strip()]:
+            self._draw_diagram_item(
+                pptx_slide, text, box_left, y, width, item_h, geometry.font_pt
+            )
+            y += item_h + gap
+
+    def _draw_boundary_rule(self, pptx_slide, left: float, band_top: float, geometry) -> None:
+        """境界の線そのもの。帯の中央に、図の幅いっぱいに引く。"""
+        style = self.style
+        thickness = max(0.02, style.diagram_boundary_rule * geometry.scale)
+        rule = pptx_slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            Inches(left),
+            Inches(band_top + (geometry.band - thickness) / 2),
+            Inches(geometry.width),
+            Inches(thickness),
+        )
+        rule.name = shape_name(SHAPE_DIAGRAM_ITEM)
+        _paint(rule, style.color_accent)
+        _no_outline(rule)
+
+    def _draw_boundary_crossings(
+        self, pptx_slide, crossings, left: float, band_top: float, geometry
+    ) -> None:
+        """線をまたぐもの。矢印を帯いっぱいに立て、その横に札を置く。
+
+        矢印は帯いっぱいに立てて、線の上下へ突き抜けさせる。帯の中で線に
+        触れているだけだと、またいでいるようには見えない。
+
+        札は **線を挟んだどちら側に置くかで向きを表す。** 下りるものは線の上に、
+        戻るものは線の下に置く。線の上に札を載せると、そこだけ線が途切れて
+        見え、**1 本の線** という図の主題が消える(それが図の主役なので)。
+        """
+        if not crossings:
+            return
+        style = self.style
+        column = geometry.item_width / len(crossings)
+        arrow_w = style.diagram_crossing_arrow * geometry.scale
+        pad = geometry.gap
+        half = geometry.band / 2
+        for index, crossing in enumerate(crossings):
+            column_left = left + column * index
+            shape = pptx_slide.shapes.add_shape(
+                MSO_SHAPE.DOWN_ARROW if crossing.down else MSO_SHAPE.UP_ARROW,
+                Inches(column_left + pad),
+                Inches(band_top + geometry.band * 0.06),
+                Inches(arrow_w),
+                Inches(geometry.band * 0.88),
+            )
+            shape.name = shape_name(SHAPE_DIAGRAM_ITEM)
+            _paint(shape, style.color_accent)
+            _no_outline(shape)
+            if not crossing.label:
+                continue
+            label = pptx_slide.shapes.add_textbox(
+                Inches(column_left + pad * 2 + arrow_w),
+                Inches(band_top if crossing.down else band_top + half),
+                Inches(max(0.3, column - pad * 3 - arrow_w)),
+                Inches(half),
+            )
+            # 札の向きは案内文でも使うので、図形の名前に残す(narration が読む)。
+            label.name = shape_name(
+                SHAPE_DIAGRAM_ITEM, language="down" if crossing.down else "up"
+            )
+            frame = label.text_frame
+            frame.word_wrap = True
+            frame.vertical_anchor = MSO_ANCHOR.MIDDLE
+            _zero_insets(frame)
+            self._fill_text(
+                frame,
+                [[Run(crossing.label)]],
+                size=geometry.font_pt * style.diagram_crossing_ratio,
+                color=style.color_accent,
+                align=PP_ALIGN.LEFT,
+            )
 
     def _draw_diagram_item(
         self, pptx_slide, text: str, left: float, top: float, width: float, height: float,

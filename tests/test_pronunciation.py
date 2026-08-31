@@ -346,6 +346,33 @@ def test_the_reading_is_never_decided_for_the_writer():
     assert inspect_readings(plans, read).warnings() == []
 
 
+def test_a_word_that_is_voiced_in_compounds_lists_the_voiced_form():
+    """「ひな型」はヒナガタと読まれる。濁った形も候補に入っていること。
+
+    候補が カタ / ケエ だけだと、同じ行に「設計」(セッケエ)があるだけで
+    **ケエ と読まれた** ことになり、正しく読めている語に誤った読みが付く。
+    突き合わせは行の仮名を見るだけなので、読まれうる形を挙げていないと、
+    別の語の音を拾ってしまう。
+    """
+    line = "仕様書や設計書のひな型であるテンプレート。"
+    plans = {7: plan_reading(line, None)}
+    read = fake_reader(
+        {
+            line: "シヨオショヤセッケエショノヒナガタデアルテンプレエト",
+            "かた": "カタ",
+            "がた": "ガタ",
+            "けい": "ケエ",
+        }
+    )
+
+    found = ambiguous(inspect_readings(plans, read))
+
+    # ガタ と ケエ の両方が行に現れるので、どちらで読まれたかは決められない。
+    # 決められないことを言うのはよいが、**ケエ だと言い切ってはいけない。**
+    assert ("型", "ケエ") not in found
+    assert ("型", "") in found
+
+
 def test_every_entry_has_at_least_two_readings():
     """候補が 1 つしかない項目は突き合わせに使えない(書き損じの検出)。"""
     from note2slides.pronunciation import AMBIGUOUS_READINGS

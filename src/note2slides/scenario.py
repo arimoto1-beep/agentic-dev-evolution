@@ -59,6 +59,8 @@ from .model import (
     Slide,
     SlideBreak,
     Table,
+    DIAGRAM_BOUNDARY,
+    boundary_parts,
     diagram_shape_of,
 )
 from .style import Style
@@ -656,7 +658,38 @@ def _diagram_part(
             f"{_where(scenario, source)}: 図の項目が {len(items)} 個あります"
             f"（1 枚に収まるのは {MAX_DIAGRAM_ITEMS} 個程度です）。"
         )
+    if shape == DIAGRAM_BOUNDARY:
+        _check_boundary(scenario, source, items)
     return Content(kind=KIND_DIAGRAM, diagram_shape=shape, diagram_items=items)
+
+
+def _check_boundary(scenario: Scenario, source: ScenarioSlide, items: List[str]) -> None:
+    """境界図の書き方を確かめる。
+
+    線の位置を決めるのは `↓` / `↑` の行そのものなので、それが無い・
+    2 か所に分かれている・片側に何も無い、のいずれでも図が決まらない。
+    ここで止めないと **線の無い境界図** が資料に出て、画像を見るまで
+    分からない(gen27 以降、図の崩れは目で見るまで分からないのが前提)。
+    """
+    parts = boundary_parts(items)
+    where = _where(scenario, source)
+    if not parts.crossings:
+        raise ScenarioError(
+            f"{where}: 境界図に、線をまたぐものが書かれていません。\n"
+            "  ↓ か ↑ で始まる行を 1 つ以上書いてください"
+            "（その行の位置が、線の位置になります）。\n"
+            "  例: ↑ AIだけで決められないこと"
+        )
+    if parts.split:
+        raise ScenarioError(
+            f"{where}: 境界図の ↓ ↑ の行が離れています。\n"
+            "  線は 1 本なので、またぐものは続けて書いてください。"
+        )
+    if not parts.upper or not parts.lower:
+        raise ScenarioError(
+            f"{where}: 境界図の、線の{'上' if not parts.upper else '下'}に何もありません。\n"
+            "  ↓ ↑ の行の前と後ろに、それぞれ 1 つ以上書いてください。"
+        )
 
 
 def _text_part(texts: List[object]) -> Content:

@@ -129,7 +129,18 @@ KIND_THUMBNAIL = "thumbnail"
 DIAGRAM_FLOW = "flow"
 #: 枠の中に並べる図(何が含まれているか)。
 DIAGRAM_FRAME = "frame"
-DIAGRAM_SHAPES = (DIAGRAM_FLOW, DIAGRAM_FRAME)
+#: 1 本の線で上下に分け、線をまたぐものを矢印で示す図(役割の分かれ目)。
+#: 流れ・枠と違って「何が線を越えるか」を書けるのが要で、越えるものを書けないなら
+#: 枠 2 つで足りる。
+DIAGRAM_BOUNDARY = "boundary"
+DIAGRAM_SHAPES = (DIAGRAM_FLOW, DIAGRAM_FRAME, DIAGRAM_BOUNDARY)
+#: 境界図で「線をまたぐもの」を書くときに行の先頭に置く印。上から下へ渡るものが
+#: `↓`、下から上へ戻るものが `↑`。シナリオに書く印と、資料に残す印と、
+#: 案内文が読み取る印を同じにしておく(3 か所で別々の書き方をすると、
+#: どこかがずれても画像を見るまで分からない)。
+CROSSING_DOWN = "↓"
+CROSSING_UP = "↑"
+CROSSING_MARKS = (CROSSING_DOWN, CROSSING_UP)
 #: 流れを **横に並べて** 描いた場合の目印。シナリオに書ける種類ではなく、
 #: 描き方(場所に収まるかどうかで `layout.diagram_geometry` が決める)。
 #: 図形の名前に残すのは、ナレーションの「上から順に」を「左から順に」に
@@ -141,12 +152,70 @@ DIAGRAM_LANGS = {
     "flow": DIAGRAM_FLOW,
     "枠": DIAGRAM_FRAME,
     "frame": DIAGRAM_FRAME,
+    "境界": DIAGRAM_BOUNDARY,
+    "boundary": DIAGRAM_BOUNDARY,
 }
 
 
 def diagram_shape_of(lang: str) -> Optional[str]:
     """コードブロックの言語名が図解の指定なら、その形を返す。"""
     return DIAGRAM_LANGS.get((lang or "").strip().lower())
+
+
+@dataclass(frozen=True)
+class Crossing:
+    """境界図で、線をまたぐもの。`down` なら上から下へ、そうでなければ下から上へ。"""
+
+    down: bool
+    label: str
+
+    @property
+    def mark(self) -> str:
+        return CROSSING_DOWN if self.down else CROSSING_UP
+
+
+@dataclass(frozen=True)
+class BoundaryParts:
+    """境界図の中身を「線の上・線をまたぐもの・線の下」に分けたもの。"""
+
+    upper: List[str]
+    crossings: List["Crossing"]
+    lower: List[str]
+    #: またぐものの並びのあとに、さらに `↓` / `↑` の行があったか。線が 2 本
+    #: あることになり、どこが境目か決まらない(呼び出し側がエラーにする)。
+    split: bool = False
+
+
+def crossing_of(line: str) -> Optional["Crossing"]:
+    """行が `↓` / `↑` で始まるなら、線をまたぐものとして読み取る。"""
+    text = line.strip()
+    for mark in CROSSING_MARKS:
+        if text.startswith(mark):
+            return Crossing(down=mark == CROSSING_DOWN, label=text[len(mark) :].strip())
+    return None
+
+
+def boundary_parts(items: List[str]) -> "BoundaryParts":
+    """境界図の行を、線の上・線をまたぐもの・線の下に分ける。
+
+    区切りの記号を別に決めず、**`↓` / `↑` の行そのものが線の位置** になる。
+    またぐものを書かない境界図は、枠を 2 つ置くのと変わらないので、
+    ここでは分けられないまま返し、書き方の誤りとして呼び出し側が知らせる。
+    """
+    upper: List[str] = []
+    crossings: List[Crossing] = []
+    lower: List[str] = []
+    split = False
+    for line in items:
+        crossing = crossing_of(line)
+        if crossing is not None:
+            if lower:
+                split = True  # 線の下にもう 1 本引かれている
+            else:
+                crossings.append(crossing)
+            continue
+        (upper if not crossings else lower).append(line)
+    return BoundaryParts(upper=upper, crossings=crossings, lower=lower, split=split)
 
 BULLET = "bullet"
 NUMBER = "number"

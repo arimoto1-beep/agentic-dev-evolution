@@ -37,12 +37,17 @@ from typing import List, Optional, Tuple
 
 from . import guidance
 from .model import (
+    CROSSING_DOWN,
+    CROSSING_UP,
     SHAPE_CODE,
     SHAPE_DIAGRAM,
     SHAPE_DIAGRAM_ITEM,
     SHAPE_FOOTER,
     parse_shape_name,
 )
+
+#: 境界図で線をまたぐものの札に、描画側が付ける名前(renderer._draw_boundary)。
+_CROSSING_BY_NAME = {"down": CROSSING_DOWN, "up": CROSSING_UP}
 
 #: 読み上げ元の種別。
 SOURCE_NOTES = "notes"
@@ -434,7 +439,7 @@ def _diagram_items(slide) -> dict:
     found: dict = {}
     current: Optional[List[str]] = None
     for position, shape in enumerate(slide.shapes):
-        kind, _, _ = parse_shape_name(getattr(shape, "name", ""))
+        kind, _, language = parse_shape_name(getattr(shape, "name", ""))
         if kind == SHAPE_DIAGRAM:
             current = []
             found[position] = current
@@ -442,7 +447,11 @@ def _diagram_items(slide) -> dict:
             text = getattr(shape, "text_frame", None)
             text = text.text.strip() if text is not None else ""
             if text:
-                current.append(text)
+                # 境界図で線をまたぐものは、向きが図形の名前に残っている。
+                # 案内文が「上から下へ」「下から上へ」を言い分けられるよう、
+                # シナリオに書いたのと同じ印を戻して渡す(model.CROSSING_MARKS)。
+                mark = _CROSSING_BY_NAME.get(language, "")
+                current.append(f"{mark}{text}" if mark else text)
         elif kind not in (SHAPE_DIAGRAM, SHAPE_DIAGRAM_ITEM):
             current = None
     return found

@@ -19,6 +19,7 @@ from pptx import Presentation
 
 from note2slides import guidance, layout, narration
 from note2slides.model import (
+    DIAGRAM_BOUNDARY,
     DIAGRAM_FLOW,
     DIAGRAM_FRAME,
     KIND_DIAGRAM,
@@ -29,6 +30,7 @@ from note2slides.model import (
     Run,
     Deck,
     Slide,
+    boundary_parts,
     diagram_shape_of,
     parse_shape_name,
 )
@@ -470,3 +472,183 @@ class TestTheDiagramUsesThePlaceItIsGiven:
         estimate = layout.content_height(text, style, body.width)
         one_line = style.line_height_pt(style.body_size(0)) / 72.0
         assert placed.parts[1].box.height >= estimate + one_line - 0.01
+
+
+BOUNDARY = (
+    "```境界\n"
+    "人間が、何を作るかを決める\n"
+    "↓ 決まった仕様\n"
+    "↑ AIだけで決められないこと\n"
+    "AIが、どう実現するかを作る\n"
+    "```"
+)
+
+
+class TestTheBoundaryDiagram:
+    """境界図。1 本の線で上下に分け、線をまたぐものを矢印で示す。
+
+    流れ・枠で書けるのは「順に進む」「中に入っている」の 2 つで、
+    **役割の分かれ目** は書けなかった。表に「誰が / 何を受け持つか」と
+    書くことはできるが、表には線が無い。「線を引く」と言っている画面に
+    線が無いと、言葉と絵が食い違う。
+
+    ここで確かめたいのは 4 つ。
+
+    * `↓` / `↑` の行が線の位置になること(区切りの記号を別に決めない)
+    * 線が図の主役として描かれること(箱より広く、箱に隠されない)
+    * 矢印が線を **突き抜ける** こと(触れているだけでは、またいで見えない)
+    * 案内文が、上下と向きを言い分けること
+    """
+
+    @pytest.mark.parametrize("lang", ["境界", "boundary"])
+    def test_a_boundary_block_becomes_a_boundary_diagram(self, lang):
+        assert diagram_shape_of(lang) == DIAGRAM_BOUNDARY
+
+    def test_the_arrow_lines_decide_where_the_line_is(self):
+        parts = boundary_parts(["人間", "↓ 仕様", "↑ 決められないこと", "AI"])
+        assert parts.upper == ["人間"]
+        assert parts.lower == ["AI"]
+        assert [(c.down, c.label) for c in parts.crossings] == [
+            (True, "仕様"),
+            (False, "決められないこと"),
+        ]
+
+    def test_the_crossings_are_not_drawn_as_boxes(self):
+        """またぐものは矢印と札になる。箱として数えると場所の見積りがずれる。"""
+        content = Content(
+            kind=KIND_DIAGRAM,
+            diagram_shape=DIAGRAM_BOUNDARY,
+            diagram_items=["人間", "↓ 仕様", "AI"],
+        )
+        assert layout.diagram_items(content) == ["人間", "AI"]
+
+    @pytest.mark.parametrize(
+        "block, message",
+        [
+            ("```境界\n人間\nAI\n```", "線をまたぐもの"),
+            ("```境界\n人間\n↓ 仕様\nAI\n↑ 戻す\n```", "離れています"),
+            ("```境界\n↓ 仕様\nAI\n```", "線の上に何もありません"),
+            ("```境界\n人間\n↓ 仕様\n```", "線の下に何もありません"),
+        ],
+    )
+    def test_a_boundary_that_has_no_line_is_refused(self, block, message):
+        """線が決まらない書き方は止める。
+
+        黙って描くと **線の無い境界図** が資料に出る。図の崩れは画像を目で
+        見るまで分からない(gen27)ので、書いた時点で知らせる。
+        """
+        with pytest.raises(ScenarioError) as error:
+            deck_of(screen(block))
+        assert message in str(error.value)
+
+    def test_the_line_is_wider_than_the_boxes(self, tmp_path):
+        """線は箱より左右へはみ出す。
+
+        箱の幅ぴったりで止めると「箱と箱をつなぐ線」に見えて、
+        越える・越えないの話に見えない。
+        """
+        rule, boxes, _ = _boundary_shapes(self._render(tmp_path))
+        assert rule.left < min(b.left for b in boxes)
+        assert rule.left + rule.width > max(b.left + b.width for b in boxes)
+
+    def test_the_arrows_go_through_the_line(self, tmp_path):
+        """矢印は線の上下へ突き抜ける。触れているだけでは、またいで見えない。"""
+        rule, _, crossings = _boundary_shapes(self._render(tmp_path))
+        assert crossings, "またぐ矢印が描かれていない"
+        for arrow in crossings:
+            assert arrow.top < rule.top
+            assert arrow.top + arrow.height > rule.top + rule.height
+
+    def test_the_label_sits_on_the_side_it_comes_from(self, tmp_path):
+        """下りるものの札は線の上、戻るものの札は線の下。
+
+        札を線の上に載せると、そこだけ線が途切れて見え、**1 本の線** という
+        図の主題が消える。向きは札の位置で表す。
+        """
+        path = self._render(tmp_path)
+        rule, _, _ = _boundary_shapes(path)
+        labels = {language: shape for shape, language in _named_labels(path)}
+        assert set(labels) == {"down", "up"}
+        assert labels["down"].top + labels["down"].height <= rule.top + rule.height
+        assert labels["up"].top >= rule.top
+
+    def test_the_drawing_stays_inside_the_place_it_was_given(self, tmp_path):
+        """描いた図形が、外枠(layout が配った場所)からはみ出さないこと。"""
+        style = Style()
+        body = layout.body_box(style)
+        shapes = _diagram_shapes(self._render(tmp_path))
+        outer = [s for s in shapes if _kind(s) == SHAPE_DIAGRAM][0]
+        assert outer.left / 914400 >= body.left - 0.02
+        assert outer.top / 914400 >= body.top - 0.02
+        assert (outer.left + outer.width) / 914400 <= body.left + body.width + 0.02
+        assert (outer.top + outer.height) / 914400 <= body.top + body.height + 0.02
+        slack = 914400 * 0.02
+        for shape in shapes:
+            if _kind(shape) != SHAPE_DIAGRAM_ITEM:
+                continue
+            assert shape.left >= outer.left - slack
+            assert shape.left + shape.width <= outer.left + outer.width + slack
+            assert shape.top >= outer.top - slack
+            assert shape.top + shape.height <= outer.top + outer.height + slack
+
+    def test_the_narration_says_which_side_and_which_way(self):
+        text = guidance.describe_diagram(
+            DIAGRAM_BOUNDARY,
+            ["人間が決める", "↓ 決まった仕様", "↑ 決められないこと", "AIが作る"],
+        )
+        assert text == (
+            "画面の図をご覧ください。"
+            "線の上は、人間が決める。線の下は、AIが作る。"
+            "上から下へ渡るのは、決まった仕様です。"
+            "下から上へ戻るのは、決められないことです。"
+        )
+
+    def test_the_direction_survives_the_presentation(self, tmp_path):
+        """資料に書き出して読み直しても、どちらの向きだったかが残ること。
+
+        案内文を作るのは資料を読む側(narration)なので、向きが資料に
+        残っていないと「上から下へ」を言えなくなる。
+        """
+        path = self._render(tmp_path)
+        prs = Presentation(path)
+        parts, _ = narration._screen_guidance(prs.slides[0])
+        assert parts and "上から下へ渡るのは、決まった仕様です。" in parts[0]
+        assert "下から上へ戻るのは、AIだけで決められないことです。" in parts[0]
+
+    def _render(self, tmp_path) -> str:
+        deck = deck_of(screen(BOUNDARY))
+        path = str(tmp_path / "b.pptx")
+        render_deck(deck, path, Style())
+        return path
+
+
+def _named_labels(path: str):
+    """境界図の札(向きが名前に残っているもの)を返す。"""
+    found = []
+    for shape in _diagram_shapes(path):
+        kind, _, language = parse_shape_name(getattr(shape, "name", ""))
+        if kind == SHAPE_DIAGRAM_ITEM and language in ("down", "up"):
+            found.append((shape, language))
+    return found
+
+
+def _boundary_shapes(path: str):
+    """境界図の図形を「線・箱・またぐ矢印」に分ける。
+
+    線と矢印は文字を持たない図形で、線は横に長く、矢印は縦に長い。
+    """
+    labels = {id(s) for s, _ in _named_labels(path)}
+    rule = None
+    boxes = []
+    crossings = []
+    for shape in _diagram_shapes(path):
+        if _kind(shape) != SHAPE_DIAGRAM_ITEM or id(shape) in labels:
+            continue
+        text = shape.text_frame.text if shape.has_text_frame else ""
+        if text.strip():
+            boxes.append(shape)
+        elif shape.width > shape.height:
+            rule = shape
+        else:
+            crossings.append(shape)
+    return rule, boxes, crossings
