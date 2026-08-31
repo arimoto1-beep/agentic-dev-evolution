@@ -34,10 +34,20 @@ def image_part(path: str = "") -> Content:
 
 
 def diagram_part(items: int = 5) -> Content:
+    """短い項目の流れ。横一列に並ぶので、高さはほとんど要らない。"""
     return Content(
         kind=KIND_DIAGRAM,
         diagram_shape=DIAGRAM_FLOW,
         diagram_items=[f"工程{i}" for i in range(items)],
+    )
+
+
+def tall_diagram_part(items: int = 5) -> Content:
+    """長い項目の流れ。横一列には収まらないので縦に積まれ、高さを使える。"""
+    return Content(
+        kind=KIND_DIAGRAM,
+        diagram_shape=DIAGRAM_FLOW,
+        diagram_items=[f"これは{i}番目の、そこそこ長い工程の名前です" for i in range(items)],
     )
 
 
@@ -63,12 +73,71 @@ class TestStacking:
         assert last.box.top + last.box.height <= box.top + box.height + 1e-9
 
     def test_one_part_uses_the_whole_body_area(self):
-        """中身が 1 つの画面は、これまでと同じ場所に描かれる。"""
+        """中身が 1 つの画面でも、使える範囲は本文の範囲いっぱいのまま。"""
         box = layout.body_box(STYLE)
 
         placed = fit([text_part(1)]).parts[0].box
 
-        assert (placed.top, placed.height) == (box.top, box.height)
+        assert placed.height == box.height
+
+
+class TestWhenThereIsRoomLeftOver:
+    """余った場所をどう扱うか。
+
+    文章・表・コードは広い箱をもらっても大きくならないので、上に貼り付けたまま
+    だと画面の下半分が丸ごと空く。大きくできる中身が無いときは、かたまりごと
+    下げて縦中央に置く(文字の大きさは変えない)。
+    """
+
+    def test_short_text_is_moved_down_towards_the_middle(self):
+        box = layout.body_box(STYLE)
+
+        placed = fit([text_part(1)]).parts[0].box
+
+        assert placed.top > box.top, "上に貼り付いたままにしない"
+        middle = box.top + box.height / 2
+        assert abs(placed.top - middle) < box.height / 4, "縦中央のあたりに来る"
+
+    def test_the_block_still_ends_inside_the_body_area(self):
+        """下げても、見積りより 1 行増えた場合にページ番号の帯へ届かない。"""
+        box = layout.body_box(STYLE)
+
+        for lines in (1, 2, 3, 5, 8):
+            placed = fit([text_part(lines)]).parts[0]
+            bottom = placed.box.top + layout.content_height(
+                placed.content, STYLE, placed.box.width
+            )
+            extra = layout._extra_line_height(placed.content, STYLE)
+            assert bottom + extra <= box.top + box.height + 1e-9, f"{lines} 行"
+
+    def test_a_full_screen_is_not_moved(self):
+        box = layout.body_box(STYLE)
+
+        placed = fit([text_part(14)]).parts[0].box
+
+        assert abs(placed.top - box.top) < 1e-9
+
+    def test_a_screen_with_a_diagram_is_not_moved(self):
+        """図解は場所が余れば自分で大きくなるので、下げる必要がない。"""
+        box = layout.body_box(STYLE)
+
+        placed = fit([text_part(1), tall_diagram_part()]).parts[0].box
+
+        assert abs(placed.top - box.top) < 1e-9
+
+    def test_a_diagram_is_not_given_height_it_cannot_use(self):
+        """横一列に並ぶ流れは、高さを渡しても大きくならない。
+
+        渡してしまうと、そのぶんが図と次の中身のあいだの空白として出る。
+        使える上限までにして、余りはかたまりごと下げるほうへ回す。
+        """
+        box = layout.body_box(STYLE)
+        usable = layout.usable_height(diagram_part(), STYLE, box.width)
+
+        placed = fit([diagram_part(), text_part(1)]).parts
+
+        assert placed[0].box.height <= usable + 1e-9
+        assert placed[0].box.top > box.top, "使えなかった余りは、下げるほうへ回る"
 
 
 class TestWhenThereIsNotEnoughRoom:
@@ -106,11 +175,11 @@ class TestWhenThereIsNotEnoughRoom:
         「縮められないもの」として数えると、代わりに文章が縮み、それでも
         入りきらずにページ番号の帯へはみ出す。
         """
-        alone = fit([diagram_part()]).parts[0].box.height
+        alone = fit([tall_diagram_part()]).parts[0].box.height
         text = text_part(6)
         needed = layout.content_height(text, STYLE, layout.body_box(STYLE).width)
 
-        placed = fit([text, diagram_part()]).parts
+        placed = fit([text, tall_diagram_part()]).parts
 
         assert placed[1].box.height < alone, "図解が譲ること"
         assert placed[0].box.height >= needed - 1e-9, "譲るのは図解であって、文章ではない"

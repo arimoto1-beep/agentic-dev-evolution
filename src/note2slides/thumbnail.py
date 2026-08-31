@@ -18,11 +18,12 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import List, Optional
 
 from . import slide_images
 from .model import KIND_THUMBNAIL, Deck, Slide
+from . import renderer as renderer_mod
 from .renderer import render_deck
 from .slide_images import ImageOptions, SlideImageError
 from .style import Style
@@ -66,6 +67,7 @@ class ThumbnailResult:
     width: int
     height: int
     pptx_path: Optional[str] = None  # --keep-pptx を指定した場合のみ残る
+    warnings: List[str] = field(default_factory=list)
 
 
 def export_thumbnail(
@@ -113,8 +115,21 @@ def export_thumbnail(
             kept = os.path.splitext(output_path)[0] + ".pptx"
             shutil.copyfile(pptx_path, kept)
 
+    warnings: List[str] = []
+    if renderer_mod.thumbnail_title_is_cramped(thumbnail.title, style):
+        warnings.append(
+            f"題が長いため、一覧で読める大きさに収まりません({len(thumbnail.title)} 文字): "
+            f"{thumbnail.title}\n"
+            "      短い題を --title で指定してください"
+            "(動画の題とサムネイルの題は別にできます)。"
+        )
+
     return ThumbnailResult(
-        path=output_path, width=image.width, height=image.height, pptx_path=kept
+        path=output_path,
+        width=image.width,
+        height=image.height,
+        pptx_path=kept,
+        warnings=warnings,
     )
 
 

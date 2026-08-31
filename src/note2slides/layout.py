@@ -44,6 +44,10 @@ CODE_MIN_HEIGHT = 0.8
 #: 図が点のように潰れるくらいなら、文章側があふれて警告になるほうがよい。
 MIN_FIGURE_SHARE = 0.25
 
+#: 大きくできる中身が無いとき、余った場所のうち何割を上に空けるか。
+#: 0.5 で、中身のかたまりが本文の範囲の縦中央に来る(下には後述の 1 行ぶんを残す)。
+CENTER_SHARE = 0.5
+
 #: 図の縦横比を読み取れなかった場合に使う比(高さ / 幅)。
 FALLBACK_IMAGE_RATIO = 0.75
 
@@ -246,6 +250,26 @@ def diagram_height(content: Content, style: Style, width: float) -> float:
     return diagram_geometry(content, style, width).height
 
 
+def usable_height(content: Content, style: Style, width: float) -> float:
+    """その中身が **実際に使える** 高さの上限(inch)。
+
+    高さを渡せば渡すだけ大きくなる中身は無い。図解は幅と
+    `_max_diagram_scale` で頭打ちになり(横並びの流れは特に早く止まる)、
+    図は幅いっぱいまでしか大きくならない。上限を超えて渡した高さは、
+    **図と次の中身のあいだの空白** になって現れる。
+    """
+    if content.kind == KIND_DIAGRAM:
+        geometry = diagram_geometry(content, style, width)
+        if geometry.height <= 0:
+            return 0.0
+        # 高さを無制限に渡したときの倍率(幅と最大倍率だけで決まる)。
+        natural_w, natural_h = geometry.width, geometry.height
+        return natural_h * min(width / natural_w if natural_w else 1.0, _max_diagram_scale(style))
+    if content.kind == KIND_IMAGE:
+        return image_height(content, width)
+    return float("inf")
+
+
 def image_height(content: Content, width: float) -> float:
     """幅いっぱいに置いた図の高さ(inch)。説明を出す場合はそのぶんも足す。"""
     return width * image_ratio(content.image_path) + (
@@ -322,6 +346,8 @@ def fit(contents: List[Content], style: Style, box: Box) -> Layout:
     # 図が最低限の場所を取るために全体が少し縮む分は、警告するほどではない。
     overflow = fixed_total / avail if avail > 0 else float("inf")
     needed = fixed_total + flex_used
+    # 中身のかたまりを上から何 inch 下げて置くか(下記の「余りの渡し先」で決める)。
+    lead = 0.0
     if needed > avail:
         # 入りきらない。小さく表示して収める(警告は呼び出し側が出す)。
         heights = [h * (avail / needed) for h in heights]
@@ -338,18 +364,40 @@ def fit(contents: List[Content], style: Style, box: Box) -> Layout:
             # 実際が 1 行多かったときに文章が下端まで来て、ページ番号の帯と
             # 同じ高さに並ぶ(gen28 が直したのがこの見え方)。
             reserve = min(extra, _extra_line_height(contents[-1], style))
+            share = extra - reserve
+            # 渡しても使えない分は渡さない。使えない高さを渡すと、そのぶんが
+            # 図と次の中身のあいだの空白になる(横並びの流れで目立つ)。
             for index in growable:
-                heights[index] += (extra - reserve) / len(growable)
+                room = max(0.0, usable_height(contents[index], style, box.width) - heights[index])
+                take = min(room, share / len(growable))
+                heights[index] += take
+                share -= take
             heights[-1] += reserve
+            # それでも余ったら、大きくできる中身が無かったときと同じに扱う。
+            slack = max(0.0, share - _extra_line_height(contents[-1], style))
+            lead = slack * CENTER_SHARE
         else:
             # 図が無ければ最後の中身に渡す。文章の高さは折り返しの見積りなので、
             # 見積りより実際が大きくても収まるようにしておく(下に何も無いので、
             # 広げても他の中身の位置は動かない。表・コードは自分の大きさで
             # 描かれるため、広い場所を渡しても大きくはならない)。
             heights[-1] += extra
+            # そのうえで、かたまり全体を下げて縦中央に置く。文章・表・コードは
+            # 広い箱をもらっても大きくならないので、上に貼り付いたままだと
+            # **画面の下半分が丸ごと空く**。2 行しか書いていない画面が、
+            # 見ている側には「作りかけ」に見える(動画では 20 秒それを見る)。
+            #
+            # 文字の大きさは変えない。書いたとおりの大きさで出すのは前提
+            # (gen28)なので、動かすのは置く場所だけにする。
+            #
+            # 下げる前に 1 行ぶんを取り分ける。文章の高さは見積りなので、
+            # 余りを全部使って中央に寄せると、実際が 1 行多かったときに
+            # 下端まで来てページ番号の帯と並ぶ(gen28 が直した見え方)。
+            slack = max(0.0, extra - _extra_line_height(contents[-1], style))
+            lead = slack * CENTER_SHARE
 
     placed: List[Placed] = []
-    top = box.top
+    top = box.top + lead
     for content, height in zip(contents, heights):
         placed.append(Placed(content, Box(box.left, top, box.width, height)))
         top += height + style.part_gap

@@ -206,11 +206,23 @@ def _report(report: pron_mod.PronunciationReport, show_lines: bool) -> None:
         )
     else:
         print("  1 文字ずつ読まれている英字はありませんでした。")
-    print(
-        "\n漢字の読み(「方」を「ほう」と読むか「かた」と読むかなど)は、"
-        "正しい読みを機械が決められないため判定していません。"
-        "上の「原稿と読み」で確かめてください。"
-    )
+
+    if report.ambiguous:
+        print()
+        print("読みが分かれる語")
+        print("=" * 60)
+        print(
+            "どちらが正しいかは書いた人にしか決められないため、判定していません。\n"
+            "**分かれる語だけ** を挙げるので、意図した読みかどうかを確かめてください。"
+        )
+        for word in report.ambiguous:
+            print(f"  {word.describe()}")
+        print(
+            f"\n{len(report.ambiguous)} 語。意図と違うものだけ、"
+            "読み方辞書(--dict)に書いてください。"
+        )
+    else:
+        print("\n読みが分かれる語は見つかりませんでした。")
 
 
 def _write_json(path: str, data) -> None:

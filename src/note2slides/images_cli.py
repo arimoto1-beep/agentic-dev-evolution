@@ -10,7 +10,7 @@ import os
 import sys
 from typing import List, Optional
 
-from . import __version__
+from . import __version__, contact_sheet
 from .console import use_utf8_output
 from .slide_images import (
     FORMATS,
@@ -60,6 +60,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--digits", type=int, default=3, help="連番の桁数(既定: 3)")
     parser.add_argument(
         "--keep-pdf", action="store_true", help="変換の中間生成物の PDF を残す"
+    )
+    parser.add_argument(
+        "--contact-sheet",
+        action="store_true",
+        help="スライドを並べた一覧(contact_001.png ...)も作る。全体を見比べて確かめる用",
+    )
+    parser.add_argument(
+        "--contact-columns",
+        type=int,
+        default=contact_sheet.DEFAULT_COLUMNS,
+        help=f"一覧の列数(既定: {contact_sheet.DEFAULT_COLUMNS})",
+    )
+    parser.add_argument(
+        "--contact-rows",
+        type=int,
+        default=contact_sheet.DEFAULT_ROWS,
+        help=f"一覧の行数(既定: {contact_sheet.DEFAULT_ROWS})",
     )
     parser.add_argument(
         "--soffice", help="LibreOffice(soffice)の場所(既定: 自動検出 / SOFFICE_PATH)"
@@ -128,12 +145,29 @@ def main(argv: Optional[List[str]] = None) -> int:
     for warning in result.warnings:
         print(f"警告: {warning}", file=sys.stderr)
 
+    sheets = []
+    if args.contact_sheet:
+        try:
+            sheets = contact_sheet.build_contact_sheets(
+                [image.path for image in result.images],
+                outdir,
+                numbers=[image.index for image in result.images],
+                columns=args.contact_columns,
+                rows=args.contact_rows,
+                fmt="png" if options.fmt not in ("png", "jpg") else options.fmt,
+            )
+        except contact_sheet.ContactSheetError as exc:
+            print(f"一覧の生成に失敗しました: {exc}", file=sys.stderr)
+            return EXIT_CONVERT
+
     if not args.quiet:
         width, height = options.size()
         print(f"{result.count} 枚のスライド画像を出力しました: {outdir}")
         print(f"  サイズ: {width}x{height} / 形式: {options.fmt}")
         print(f"  一覧: {os.path.basename(result.manifest_path)}")
         print(f"  ffmpeg で読む場合のパターン: {ffmpeg_pattern(options)}")
+        for sheet in sheets:
+            print(f"  一覧: {os.path.basename(sheet.path)}({len(sheet.slides)} 枚)")
         if result.pdf_path:
             print(f"  中間 PDF: {result.pdf_path}")
     return EXIT_OK

@@ -104,6 +104,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(str(exc), file=sys.stderr)
         return EXIT_FAILED
 
+    for warning in result.warnings:
+        print(f"警告: {warning}", file=sys.stderr)
+
     if not args.quiet:
         print(f"サムネイルを出力しました: {result.path}")
         print(f"  サイズ: {result.width}x{result.height}")

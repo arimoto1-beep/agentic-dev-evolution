@@ -257,3 +257,99 @@ def test_the_reading_shown_is_the_one_that_is_synthesized():
     report = inspect_readings(plans, read)
 
     assert report.slides[0].lines[0].kana == "エエダブリュウエスデス"
+
+
+# ---------------------------------------------------------------------------
+# 読みが分かれる語
+# ---------------------------------------------------------------------------
+#
+# gen29 が英字を絞り込んだあとも、人は gen29 の動画を聞いて「値」を「ね」、
+# 「通っている」を「かよっている」と読む誤りを見つけている。日本語は
+# 読み上げ単位の仮名を全部読まないと分からないままだった。
+#
+# ここで言い切れるのは、正しい読みではなく **読みが分かれること** だけ。
+
+
+def ambiguous(report):
+    return {(w.surface, w.kana): w.slides for w in report.ambiguous}
+
+
+def test_a_word_with_more_than_one_reading_is_named():
+    """「値」が出たら、どちらで読まれたかを添えて挙げる。"""
+    plans = {31: plan_reading("三つの値で整理します。", None)}
+    read = fake_reader(
+        {"三つの値で整理します。": "ミッツノネデセエリシマス", "あたい": "アタイ", "ね": "ネ"}
+    )
+
+    report = inspect_readings(plans, read)
+
+    assert ("値", "ネ") in ambiguous(report)
+
+
+def test_the_same_word_read_two_ways_is_split_by_reading():
+    """同じ表記でも、画面によって読みが違えば分けて挙げる。
+
+    まとめて 1 件にすると、両方の音が現れて「特定できません」にしかならない。
+    「進め方」はカタ、「古い方法」はホオで、どちらも正しい。
+    """
+    plans = {
+        4: plan_reading("進め方を見ます。", None),
+        28: plan_reading("古い方法ではありません。", None),
+    }
+    read = fake_reader(
+        {
+            "進め方を見ます。": "ススメカタオミマス",
+            "古い方法ではありません。": "フルイホオホオデワアリマセン",
+            "ほう": "ホオ",
+            "かた": "カタ",
+        }
+    )
+
+    found = ambiguous(inspect_readings(plans, read))
+
+    assert found[("方", "カタ")] == [4]
+    assert found[("方", "ホオ")] == [28]
+
+
+def test_a_candidate_contained_in_another_is_not_a_tie():
+    """「入って」がハイッテと読まれると、候補のイッテにも必ず一致する。
+
+    ここで長いほうを採らないと、正しく読めている語が毎回
+    「特定できません」として挙がり、一覧が信用されなくなる。
+    """
+    plans = {8: plan_reading("ここには入っていません。", None)}
+    read = fake_reader(
+        {
+            "ここには入っていません。": "ココニワハイッテイマセン",
+            "はいって": "ハイッテ",
+            "いって": "イッテ",
+        }
+    )
+
+    report = inspect_readings(plans, read)
+
+    assert ("入って", "ハイッテ") in ambiguous(report)
+
+
+def test_the_reading_is_never_decided_for_the_writer():
+    """どちらが正しいかは言わない。候補を並べるだけ。"""
+    plans = {31: plan_reading("三つの値で整理します。", None)}
+    read = fake_reader(
+        {"三つの値で整理します。": "ミッツノネデセエリシマス", "あたい": "アタイ", "ね": "ネ"}
+    )
+
+    word = [w for w in inspect_readings(plans, read).ambiguous if w.surface == "値"][0]
+
+    assert word.kana == "ネ"
+    assert "アタイ" in word.alternatives
+    # 「間違い」とは言わない。合成前の警告に混ぜない。
+    assert inspect_readings(plans, read).warnings() == []
+
+
+def test_every_entry_has_at_least_two_readings():
+    """候補が 1 つしかない項目は突き合わせに使えない(書き損じの検出)。"""
+    from note2slides.pronunciation import AMBIGUOUS_READINGS
+
+    for surface, readings in AMBIGUOUS_READINGS.items():
+        assert len(readings) >= 2, surface
+        assert len(set(readings)) == len(readings), surface

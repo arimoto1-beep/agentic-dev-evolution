@@ -77,6 +77,13 @@ _FOOTER_TITLE_SHARE = 0.6
 _THUMB_LEFT = 1.0
 _THUMB_WIDTH = 11.33
 _THUMB_TITLE_SIZES = (68, 60, 54, 48, 42, 36)
+#: 自然な切れ目では収まらない題を小さくしていくときの刻み(pt)。
+_THUMB_TITLE_STEP = 2.0
+#: これ以下になったら、一覧では読めない(`thumbnail_title_is_cramped` が知らせる)。
+_THUMB_TITLE_MIN_SIZE = 20.0
+#: それでも収まらない題のための、崩さないための下限(pt)。読めるかどうかは
+#: 上の警告に任せ、**版面からはみ出さないこと** だけをここで守る。
+_THUMB_TITLE_HARD_MIN = 6.0
 _THUMB_TITLE_MAX_LINES = 3
 _THUMB_TITLE_MAX_HEIGHT = 3.9
 _THUMB_RULE_WIDTH = 2.2
@@ -93,6 +100,56 @@ _THUMB_TOP_MIN = 1.2
 
 _SLIDE_WIDTH_IN = SLIDE_WIDTH_EMU / 914400
 _SLIDE_HEIGHT_IN = SLIDE_HEIGHT_EMU / 914400
+
+
+def thumbnail_title_fallback(title: str, style: Style):
+    """語の切れ目では 3 行に収まらない題を、確実に収まる大きさまで小さくする。
+
+    ここへ来るのは、題が長すぎる場合だけ。以前はいちばん小さい大きさを選んで
+    幅で折り返していたが、**幅の折り返しは最後の 1 行だけ幅を見ない**
+    (`text_wrap._hard_wrap` が残りを全部そこへ入れる)。そのため長い題は
+    最後の行がスライドの外まで伸びていた。警告も出ないので、画像を見るまで
+    分からない ——「サムネイルのレイアウトが崩れる」として出ていたのがこれ。
+
+    ここでは **収まったことを確かめてから返す**。行数・幅・高さの 3 つを見る。
+    """
+    width_pt = inches_to_pt(_THUMB_WIDTH)
+    size = float(_THUMB_TITLE_SIZES[-1])
+    while size >= _THUMB_TITLE_HARD_MIN:
+        lines = text_wrap.fit_lines(title, size, width_pt, _THUMB_TITLE_MAX_LINES)
+        if _thumbnail_lines_fit(lines, size, width_pt, style):
+            return size, lines
+        size -= _THUMB_TITLE_STEP
+    # 3 行に収まらないほど長い題。ここまで来ると読める大きさではないが、
+    # 切り詰めれば書いていないものを出すことになり、はみ出させれば崩れる。
+    # **崩さないほう** を選び、読めないことは警告で知らせる
+    # (`thumbnail_title_is_cramped` -> 「短い題を --title で指定してください」)。
+    size = _THUMB_TITLE_HARD_MIN
+    return size, text_wrap.fit_lines(title, size, width_pt, _THUMB_TITLE_MAX_LINES)
+
+
+def _thumbnail_lines_fit(lines, size: float, width_pt: float, style: Style) -> bool:
+    """折り返した結果が、行数・幅・高さのすべてで収まっているか。"""
+    if len(lines) > _THUMB_TITLE_MAX_LINES:
+        return False
+    if any(metrics.text_width_em(line) * size > width_pt for line in lines):
+        return False
+    return len(lines) * style.line_height_pt(size, 1.0) / 72.0 <= _THUMB_TITLE_MAX_HEIGHT
+
+
+def thumbnail_title_is_cramped(title: str, style: Optional[Style] = None) -> bool:
+    """その題が、サムネイルとして読める大きさに収まらないか。
+
+    一覧では小さく表示されるため、ここまで小さくなった題は実際には読めない。
+    崩さずに出すことはできるので止めはしないが、知らせる。
+    """
+    style = style or Style()
+    for max_lines in (2, _THUMB_TITLE_MAX_LINES):
+        for size in _THUMB_TITLE_SIZES:
+            lines = text_wrap.natural_fit_lines(title, size, inches_to_pt(_THUMB_WIDTH), max_lines)
+            if lines is not None and len(lines) <= max_lines:
+                return False
+    return True
 
 
 def render_deck(deck: Deck, output_path: str, style: Optional[Style] = None) -> str:
@@ -281,11 +338,7 @@ class Renderer:
             found = self._thumbnail_fit(title, max_lines)
             if found:
                 return found
-        size = _THUMB_TITLE_SIZES[-1]
-        # どの大きさでも自然には収まらない題。最後は幅で折り返して収める。
-        return size, text_wrap.fit_lines(
-            title, size, inches_to_pt(_THUMB_WIDTH), _THUMB_TITLE_MAX_LINES
-        )
+        return thumbnail_title_fallback(title, self.style)
 
     def _thumbnail_fit(self, title: str, max_lines: int):
         """`max_lines` 行に自然に収まる、いちばん大きい文字を探す(無ければ None)。

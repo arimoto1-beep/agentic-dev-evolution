@@ -46,6 +46,69 @@ SPELLED_MIN_LETTERS = 4
 #: 1 語として取り出す(`.` `/` は合成エンジンもそこで切るため区切りとして扱う)。
 _LATIN_WORD = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
 
+#: 読みが 1 つに定まらない表記と、その候補(ひらがな)。
+#:
+#: gen29 は「英字が 1 文字ずつ読まれている」という **機械が言い切れる 1 種類** を
+#: 見つけて、確かめる範囲を 16 分から 30 秒に縮めた。それでも人が gen29 の動画を
+#: 聞いて「値」を「ね」、「通っている」を「かよっている」と読む誤りを見つけている。
+#: **日本語は読み上げ単位ごとの仮名を全部読まないと分からない** ままだった。
+#:
+#: ここで言い切れるのは、正しい読みではなく **読みが分かれること** である。
+#: 「方」を「ほう」と読むか「かた」と読むかは書いた人にしか決められないが、
+#: 「この語は 2 通りに読まれる」ことは原稿と関係なく言える。だから
+#: **どちらが正しいかは決めず、分かれる語だけを名指しする。**
+#:
+#: 候補を仮名で書くのは、エンジンに読ませて突き合わせるため
+#: (`A-Z` の表を書き写さずエンジンに聞いた gen29 と同じ理由。版が変われば
+#: 仮名の書き方も変わる)。**この表は「正しい読み」の表ではなく「割れる語」の表** で、
+#: 網羅もしていない。足りなければ足す。
+AMBIGUOUS_READINGS: Dict[str, Sequence[str]] = {
+    # 人が実際に踏んだもの
+    "値": ("あたい", "ね"),
+    "通って": ("かよって", "とおって"),
+    "通っている": ("かよっている", "とおっている"),
+    "通した": ("とおした", "かよした"),
+    "方": ("ほう", "かた"),
+    # 送り仮名で読みが割れるもの
+    "行った": ("おこなった", "いった"),
+    "行って": ("おこなって", "いって"),
+    "入って": ("はいって", "いって"),
+    "開いて": ("ひらいて", "あいて"),
+    "空いて": ("あいて", "すいて"),
+    "分けて": ("わけて", "ぶんけて"),
+    "重ねて": ("かさねて", "じゅうねて"),
+    "外して": ("はずして", "がいして"),
+    # 熟語として読みが割れるもの
+    "一日": ("いちにち", "ついたち"),
+    "一角": ("いっかく", "ひとかど"),
+    "最中": ("さいちゅう", "もなか"),
+    "上手": ("じょうず", "うわて", "かみて"),
+    "下手": ("へた", "したて", "しもて"),
+    "大事": ("だいじ", "おおごと"),
+    "市場": ("しじょう", "いちば"),
+    "変化": ("へんか", "へんげ"),
+    "見物": ("けんぶつ", "みもの"),
+    "生物": ("せいぶつ", "なまもの"),
+    "気質": ("きしつ", "かたぎ"),
+    "細々": ("こまごま", "ほそぼそ"),
+    "後で": ("あとで", "ごで"),
+    "その後": ("そのご", "そのあと", "そののち"),
+    "皆": ("みな", "みんな"),
+    "私": ("わたし", "わたくし"),
+    "型": ("かた", "けい"),
+}
+# 入れないもの:「何」「数」「間」「他」のように、候補の仮名が短く
+# (ナン・スウ・マ・タ)、文中の別の語にもそのまま現れる表記。読まれた読みを
+# 見分けられないので、挙げても毎回「特定できません」になる。**判定できないものを
+# 判定した風に出すと出力全体が信用されなくなる**(gen29)ので、黙って落とす。
+# 表に書き損じが混ざると、警告が出ない・出続けるという形で静かに効くので、
+# 読み込み時に形だけ確かめる(候補が 1 つ以下の項目は突き合わせに使えない)。
+AMBIGUOUS_READINGS = {
+    surface: tuple(readings)
+    for surface, readings in AMBIGUOUS_READINGS.items()
+    if len(readings) >= 2 and all(r.strip() for r in readings)
+}
+
 #: エ段の仮名。この直後の「イ」は長音(エー)で、合成エンジンは同じ音を
 #: 「エイ」とも「エエ」とも書く(`A` 単体は「エイ」、`PASS` の中では「エエ」)。
 #: 1 文字ずつ読まれているかを比べるときは、どちらでも同じとみなす。
@@ -105,6 +168,29 @@ class WordReading:
 
 
 @dataclass
+class AmbiguousWord:
+    """読みが分かれる表記 1 つと、今回そう読まれたらしい読み。
+
+    `kana` は、候補のうち **その読み上げ単位の仮名に実際に現れたもの** 。
+    見分けが付かなければ空にする。**分からないものを分かった風に出さない。**
+    """
+
+    surface: str
+    kana: str = ""
+    alternatives: List[str] = field(default_factory=list)
+    slides: List[int] = field(default_factory=list)
+
+    def describe(self) -> str:
+        where = "、".join(f"{n}枚目" for n in self.slides[:6])
+        if len(self.slides) > 6:
+            where += f" ほか{len(self.slides) - 6}枚"
+        others = "/".join(self.alternatives)
+        if self.kana:
+            return f"{self.surface} -> {self.kana}(ほかに {others} とも読む語)({where})"
+        return f"{self.surface} -> 読みを特定できません({others} のいずれか)({where})"
+
+
+@dataclass
 class LineReading:
     """読み上げ単位 1 つの、原稿と読み。
 
@@ -140,10 +226,11 @@ class PronunciationReport:
 
     slides: List[SlideReading] = field(default_factory=list)
     words: List[WordReading] = field(default_factory=list)
+    ambiguous: List[AmbiguousWord] = field(default_factory=list)
 
     @property
     def spelled(self) -> List[WordReading]:
-        """1 文字ずつ読まれている語。機械が言い切れるのはここだけ。"""
+        """1 文字ずつ読まれている語。機械が「間違い」と言い切れるのはここだけ。"""
         return [word for word in self.words if word.spelled]
 
     def warnings(self) -> List[str]:
@@ -183,6 +270,15 @@ class PronunciationReport:
                 }
                 for word in self.words
             ],
+            "ambiguous": [
+                {
+                    "surface": word.surface,
+                    "kana": word.kana,
+                    "alternatives": word.alternatives,
+                    "slides": word.slides,
+                }
+                for word in self.ambiguous
+            ],
         }
 
 
@@ -220,7 +316,76 @@ def inspect_readings(
         if lines and on_progress:
             on_progress(index)
     report.words = _collect_words(report.slides, read_kana)
+    report.ambiguous = _collect_ambiguous(report.slides, read_kana, resolve=lines)
     return report
+
+
+def _collect_ambiguous(
+    slides: Sequence[SlideReading],
+    read_kana: Callable[[str], str],
+    resolve: bool = True,
+) -> List[AmbiguousWord]:
+    """読みが分かれる表記を集め、どちらで読まれたかが分かるものは示す。
+
+    表記を見つけるのは文字を照らし合わせるだけなので、音にも問い合わせにも
+    頼らない。**どちらで読まれたか** を見るときだけ、その読み上げ単位の仮名に
+    候補の仮名が現れるかを確かめる(`resolve=False` なら表記だけを挙げる)。
+
+    1 つの表記につき 1 行にまとめる。「方」が 12 回出ても、読む側が確かめるのは
+    **1 行** で済む —— 44 枚ぶんの仮名を読み下すのとは、作業がまるで違う。
+    """
+    # 出てきた表記ごとに、候補の仮名を 1 度だけエンジンに聞く。
+    readings: Dict[str, Dict[str, str]] = {}
+    order: List[str] = []
+    # (表記, 読まれた読み)ごとのスライド番号。同じ語が画面によって別々に
+    # 読まれることがあるので(「進め方」はカタ、「見たい方は」はホオ)、
+    # **occurrence ごとに** 見分けて、読みごとに分ける。まとめて union すると
+    # 両方の音が現れて、いつまでも「特定できません」になる。
+    groups: Dict[tuple, List[int]] = {}
+
+    for slide in slides:
+        for line in slide.lines:
+            for surface, candidates in AMBIGUOUS_READINGS.items():
+                if surface not in line.to_speak:
+                    continue
+                if surface not in readings:
+                    readings[surface] = {c: normalize_kana(read_kana(c)) for c in candidates}
+                    order.append(surface)
+                chosen = ""
+                if resolve and line.kana:
+                    seen = normalize_kana(line.kana)
+                    hit = {k for k in readings[surface].values() if k and k in seen}
+                    # 候補どうしが含み合う場合は、長いほうを採る。
+                    # 「入って」の候補 ハイッテ / イッテ は、ハイッテ と読まれると
+                    # イッテ も必ず一致してしまう。ここで捨てないと、正しく
+                    # 読めている語が毎回「特定できません」として挙がる。
+                    hit = {k for k in hit if not any(k != o and k in o for o in hit)}
+                    if len(hit) == 1:
+                        chosen = next(iter(hit))
+                key = (surface, chosen)
+                if key not in groups:
+                    groups[key] = []
+                if slide.index not in groups[key]:
+                    groups[key].append(slide.index)
+
+    found: List[AmbiguousWord] = []
+    for surface in order:
+        for (word, chosen), where in groups.items():
+            if word != surface:
+                continue
+            found.append(
+                AmbiguousWord(
+                    surface=surface,
+                    kana=chosen,
+                    alternatives=[
+                        kana or name
+                        for name, kana in readings[surface].items()
+                        if kana != chosen
+                    ],
+                    slides=where,
+                )
+            )
+    return found
 
 
 def _collect_words(

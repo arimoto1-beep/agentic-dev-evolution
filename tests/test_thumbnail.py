@@ -136,6 +136,46 @@ class TestHowItIsPlaced:
         assert lines == ["教材動画のつくり方"]
         assert size == 68
 
+    def test_no_line_ever_runs_off_the_slide(self):
+        """どんなに長い題でも、行が版面の幅を超えない。
+
+        幅だけを見た折り返し(`text_wrap._hard_wrap`)は **最後の 1 行だけ
+        幅を見ない**(残りを全部そこへ入れる)。以前はそこへ直接落ちていたため、
+        長い題の最後の行がスライドの外まで伸びていた(実測で 9 inch 超)。
+        警告も出ないので、画像を見るまで分からない。
+        """
+        from note2slides import metrics
+        from note2slides.renderer import _THUMB_WIDTH
+        from note2slides.style import inches_to_pt
+
+        width_pt = inches_to_pt(_THUMB_WIDTH)
+        titles = [
+            "短い題",
+            "生成AIを前提とした開発環境をゼロから作り直すための実践ガイド",
+            "AIにいきなりコードを書かせるのではなく仕様と設計とテスト設計と実装と"
+            "レビューを工程として分け人間が重要な判断を持ったまま開発を進めるための"
+            "AI駆動開発スターターキットの紹介",
+            "あ" * 200,
+        ]
+        for title in titles:
+            size, lines = self.title_lines(title)
+            assert len(lines) <= 3, title
+            assert "".join(lines) == title, "題を切り詰めない"
+            for line in lines:
+                used = metrics.text_width_em(line) * size
+                assert used <= width_pt + 1e-6, f"{title!r} の行がはみ出す: {line!r}"
+
+    def test_a_title_too_long_to_read_is_reported(self):
+        """崩さずに出せても、一覧で読めない大きさなら知らせる。"""
+        from note2slides.renderer import thumbnail_title_is_cramped
+
+        assert not thumbnail_title_is_cramped("AI駆動開発スターターキット")
+        assert thumbnail_title_is_cramped(
+            "AIにいきなりコードを書かせるのではなく仕様と設計とテスト設計と実装と"
+            "レビューを工程として分け人間が重要な判断を持ったまま開発を進めるための"
+            "AI駆動開発スターターキットの紹介"
+        )
+
 
 class TestTakingTheTitleFromTheInput:
     def test_scenario_gives_its_cover(self, tmp_path):
