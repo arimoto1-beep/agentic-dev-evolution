@@ -22,6 +22,7 @@ from note2slides.model import (
     DIAGRAM_BOUNDARY,
     DIAGRAM_FLOW,
     DIAGRAM_LANES,
+    DIAGRAM_STEPS,
     DIAGRAM_FRAME,
     KIND_DIAGRAM,
     SHAPE_DIAGRAM,
@@ -35,6 +36,7 @@ from note2slides.model import (
     diagram_shape_of,
     lane_parts,
     parse_shape_name,
+    step_parts,
 )
 from note2slides.renderer import render_deck
 from note2slides.scenario import ScenarioError, build_deck, parse_scenario
@@ -908,3 +910,221 @@ def _lane_rule(path: str):
     """列を分ける縦線。文字を持たず、いちばん背の高い縦長の図形。"""
     tall = [s for s in _lane_plain(path) if s.height > s.width]
     return max(tall, key=lambda s: s.height) if tall else None
+
+
+STEPS = (
+    "```階段\n"
+    "Lv1: それっぽい指摘を出す\n"
+    "Lv2: 危ない概念に気づく\n"
+    "← Haiku4.5\n"
+    "Lv3: 具体的な誤りを特定する\n"
+    "Lv4: 横断確認する\n"
+    "← Sonnet5 effort max\n"
+    "```"
+)
+
+
+class TestTheStepsDiagram:
+    """階段図。段を上から下へ 1 段ずつずらして積み、到達点を横に置く。
+
+    流れ・枠・境界・レーンのどれでも書けなかったのは **同じ物差しの上で、
+    届いた高さが違うこと** だった。流れは「次に進む」としか言えず(全員が
+    最後まで進んでしまう)、境界は 2 段しか作れず、レーンは 1 行 1 箱なので
+    段とその到達点を同じ行に置けない。
+
+    ここで確かめたいのは 5 つ。
+
+    * 書いた順が、そのまま上から下の並びになること
+    * 段が 1 段ずつ **右へずれる** こと(ずれが「深くなること」そのもの)
+    * 段と段が蹴込みでつながって見えること(離れた箱に見えない)
+    * 到達点が、**その段の縁まで** 届く矢印になること
+    * 到達点の札が、段の上に重ならないこと
+    """
+
+    @pytest.mark.parametrize("lang", ["階段", "steps", "STEPS"])
+    def test_a_steps_block_becomes_a_steps_diagram(self, lang):
+        assert diagram_shape_of(lang) == DIAGRAM_STEPS
+
+    def test_the_levels_keep_the_order_they_were_written(self):
+        parts = step_parts(["Lv1: 浅い", "Lv2: 深い", "Lv3: もっと深い"])
+        assert [(lv.name, lv.text) for lv in parts.levels] == [
+            ("Lv1", "浅い"),
+            ("Lv2", "深い"),
+            ("Lv3", "もっと深い"),
+        ]
+
+    @pytest.mark.parametrize("mark", ["：", ":"])
+    def test_the_colon_can_be_full_width_or_half_width(self, mark):
+        """レーン図と同じ区切りにしてある(覚えることを増やさない)。"""
+        parts = step_parts([f"Lv1{mark} 浅い", f"Lv2{mark} 深い"])
+        assert [lv.name for lv in parts.levels] == ["Lv1", "Lv2"]
+        assert parts.levels[0].text == "浅い"
+
+    def test_the_reach_remembers_which_level_it_stopped_at(self):
+        parts = step_parts(["Lv1: 浅い", "Lv2: 深い", "← Haiku4.5", "Lv3: もっと深い"])
+        assert [(r.after, r.label) for r in parts.reaches] == [(1, "Haiku4.5")]
+
+    def test_the_reach_is_not_drawn_as_a_box(self):
+        """到達点は矢印と札になる。箱として数えると場所の見積りがずれる。"""
+        content = Content(
+            kind=KIND_DIAGRAM,
+            diagram_shape=DIAGRAM_STEPS,
+            diagram_items=["Lv1: 浅い", "Lv2: 深い", "← Haiku4.5"],
+        )
+        assert layout.diagram_items(content) == ["浅い", "深い"]
+
+    @pytest.mark.parametrize(
+        "block, message",
+        [
+            ("```階段\nLv1: 浅い\n深い\n```", "段の名前が書かれていない"),
+            ("```階段\nLv1: 浅い\n↓ 落ちる\nLv2: 深い\n```", "↓ ↑ の行があります"),
+            ("```階段\nLv1: 浅い\n```", "段が 1 つしかありません"),
+            ("```階段\n← Haiku4.5\nLv1: 浅い\nLv2: 深い\n```", "段より前にあります"),
+            ("```階段\nLv1: 浅い\n← A\n← B\nLv2: 深い\n```", "到達点が 2 つ"),
+        ],
+    )
+    def test_a_steps_diagram_that_cannot_be_drawn_is_refused(self, block, message):
+        """図が決まらない書き方は、資料にする前に止める。
+
+        段が 1 つの図は階段ではなく、同じ段に到達点が 2 つ付くと札が重なる。
+        どちらも黙って描くと **画像を目で見るまで気付けない**
+        (gen27 以降の前提)。
+        """
+        with pytest.raises(ScenarioError) as error:
+            deck_of(screen(block))
+        assert message in str(error.value)
+
+    def test_each_level_steps_further_right_and_further_down(self, tmp_path):
+        """1 段ずつ右へ・下へずれること。
+
+        ずれが 0 なら、ただ縦に積まれた箱で、深くなっていくことが見えない。
+        """
+        badges = _step_badges(self._render(tmp_path))
+        assert len(badges) == 4
+        for before, after in zip(badges, badges[1:]):
+            assert after.left > before.left, "段が右へずれていない"
+            assert after.top > before.top, "段が下へずれていない"
+
+    def test_the_levels_are_joined_by_a_riser(self, tmp_path):
+        """段と段のあいだに蹴込みがあること。
+
+        これが無いと、ずらして置いた箱が別々に浮いて見える。階段として
+        読めるかどうかは、段そのものではなくここで決まる。
+        """
+        path = self._render(tmp_path)
+        badges = _step_badges(path)
+        risers = [s for s in _step_plain(path) if s.height > s.width]
+        assert len(risers) == len(badges) - 1, "蹴込みの数が段のあいだの数と合わない"
+        for riser, upper, lower in zip(risers, badges, badges[1:]):
+            assert upper.top + upper.height <= riser.top + 1
+            assert riser.top + riser.height >= lower.top - 1
+
+    def test_the_reach_arrow_touches_the_level_it_points_at(self, tmp_path):
+        """到達点の矢印は、その段の縁から出て、見える長さがある。
+
+        帯の中で止まると、どの段のことなのかが決まらない(レーン図の戻りで
+        直したのと同じところ)。長さは **どの段の矢印も** 見る。いちばん深い
+        段は帯にいちばん近いので、そこだけが矢じりだけになりやすい ——
+        浅い段の矢印だけを見ていると、その一本を見落とす。
+        """
+        path = self._render(tmp_path)
+        edges = [s.left + s.width for s in _step_bodies(path)]
+        slack = 914400 * 0.03
+        arrows = [
+            s
+            for s in _step_plain(path)
+            if s.width > s.height
+            and any(abs(s.left - edge) < slack for edge in edges)
+        ]
+        assert len(arrows) == 2, "到達点の矢印が、段の縁から出ていない"
+        for arrow in arrows:
+            assert arrow.width > 914400 * 0.3, "矢印が矢じりだけになっている"
+
+    def test_the_reach_label_stays_off_the_levels(self, tmp_path):
+        """到達点の札は段の右の帯に置く。段に重なると段の文字が読めない。"""
+        path = self._render(tmp_path)
+        labels = _step_shapes(path, "step-reach")
+        assert len(labels) == 2, "到達点の札が描かれていない"
+        deepest = max(s.left + s.width for s in _step_bodies(path))
+        for label in labels:
+            assert label.left >= deepest, "札が段に重なっている"
+
+    def test_the_drawing_stays_inside_the_place_it_was_given(self, tmp_path):
+        """描いた図形が、layout が配った場所からはみ出さないこと。"""
+        path = self._render(tmp_path)
+        shapes = _diagram_shapes(path)
+        outer = [s for s in shapes if _kind(s) == SHAPE_DIAGRAM][0]
+        slack = 914400 * 0.02
+        for shape in shapes:
+            if _kind(shape) != SHAPE_DIAGRAM_ITEM:
+                continue
+            assert shape.left >= outer.left - slack
+            assert shape.left + shape.width <= outer.left + outer.width + slack
+            assert shape.top >= outer.top - slack
+            assert shape.top + shape.height <= outer.top + outer.height + slack
+
+    def test_the_narration_says_the_level_name_for_the_reach(self):
+        """到達点は段の名前で言う。段の文をもう 1 度読むと、同じ文が 2 回出る。"""
+        text = guidance.describe_diagram(
+            DIAGRAM_STEPS,
+            [
+                "Lv1: それっぽい指摘を出す",
+                "Lv2: 危ない概念に気づく",
+                "← Haiku4.5",
+                "Lv3: 具体的な誤りを特定する",
+            ],
+        )
+        assert text == (
+            "画面の図をご覧ください。"
+            "上から下へ、だんだん深くなります。"
+            "Lv1、それっぽい指摘を出す。"
+            "Lv2、危ない概念に気づく。"
+            "Lv3、具体的な誤りを特定する。"
+            "Lv2まで届いたのは、Haiku4.5です。"
+        )
+
+    def test_the_steps_survive_the_presentation(self, tmp_path):
+        """資料に書き出して読み直しても、段の名前と到達点が残ること。"""
+        prs = Presentation(self._render(tmp_path))
+        parts, _ = narration._screen_guidance(prs.slides[0])
+        assert parts, "案内文が作られていない"
+        assert "Lv1、それっぽい指摘を出す。" in parts[0]
+        assert "Lv2まで届いたのは、Haiku4.5です。" in parts[0]
+        assert "Lv4まで届いたのは、Sonnet5 effort maxです。" in parts[0]
+
+    def _render(self, tmp_path) -> str:
+        deck = deck_of(screen(STEPS))
+        path = str(tmp_path / "steps.pptx")
+        render_deck(deck, path, Style())
+        return path
+
+
+def _step_shapes(path: str, language: str):
+    found = []
+    for shape in _diagram_shapes(path):
+        kind, _, found_language = parse_shape_name(getattr(shape, "name", ""))
+        if kind == SHAPE_DIAGRAM_ITEM and found_language == language:
+            found.append(shape)
+    return found
+
+
+def _step_badges(path: str):
+    """段の名前の札(Lv1 など)。"""
+    return _step_shapes(path, "step-badge")
+
+
+def _step_bodies(path: str):
+    """段の中身の箱。"""
+    return _step_shapes(path, "step-body")
+
+
+def _step_plain(path: str):
+    """文字を持たない図形(蹴込みと、到達点の矢印)。"""
+    found = []
+    for shape in _diagram_shapes(path):
+        if _kind(shape) != SHAPE_DIAGRAM_ITEM:
+            continue
+        text = shape.text_frame.text if shape.has_text_frame else ""
+        if not text.strip():
+            found.append(shape)
+    return found

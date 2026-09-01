@@ -39,6 +39,7 @@ from . import guidance
 from .model import (
     CROSSING_DOWN,
     CROSSING_UP,
+    REACH_MARK,
     SHAPE_CODE,
     SHAPE_DIAGRAM,
     SHAPE_DIAGRAM_ITEM,
@@ -56,6 +57,12 @@ _CROSSING_BY_NAME = {"down": CROSSING_DOWN, "up": CROSSING_UP}
 #: 小文字にするので、「AI」が「ai」になって読み上げられてしまう。
 _LANE_HEAD = "lane-head"
 _LANE_COLUMNS = ("lane-a", "lane-b")
+
+#: 階段図の図形に、描画側が付ける名前(renderer.PptxRenderer.STEP_*)。
+#: 段の名前もレーン名と同じ理由で **図形の文字** から取る。
+_STEP_BADGE = "step-badge"
+_STEP_BODY = "step-body"
+_STEP_REACH = "step-reach"
 
 #: 読み上げ元の種別。
 SOURCE_NOTES = "notes"
@@ -447,18 +454,29 @@ def _diagram_items(slide) -> dict:
     found: dict = {}
     current: Optional[List[str]] = None
     lanes: List[str] = []
+    badge = ""
     for position, shape in enumerate(slide.shapes):
         kind, _, language = parse_shape_name(getattr(shape, "name", ""))
         if kind == SHAPE_DIAGRAM:
             current = []
             lanes = []
+            badge = ""
             found[position] = current
         elif kind == SHAPE_DIAGRAM_ITEM and current is not None:
             text = getattr(shape, "text_frame", None)
             text = text.text.strip() if text is not None else ""
             if not text:
                 continue
-            if language == _LANE_HEAD:
+            if language == _STEP_BADGE:
+                # 階段図の段の名前。段の中身は次に来るので、覚えて結び直す。
+                badge = text
+            elif language == _STEP_BODY:
+                current.append(f"{badge}: {text}" if badge else text)
+                badge = ""
+            elif language == _STEP_REACH:
+                # 到達点は、シナリオに書いたのと同じ印を戻して渡す。
+                current.append(f"{REACH_MARK} {text}")
+            elif language == _LANE_HEAD:
                 # レーン名の帯は項目ではない。手順にレーン名を結び直すために
                 # 覚えておく(帯は手順より先に描かれる)。
                 lanes.append(text)

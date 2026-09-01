@@ -61,8 +61,10 @@ from .model import (
     Table,
     DIAGRAM_BOUNDARY,
     DIAGRAM_LANES,
+    DIAGRAM_STEPS,
     boundary_parts,
     lane_parts,
+    step_parts,
     diagram_shape_of,
 )
 from .style import Style
@@ -655,15 +657,20 @@ def _diagram_part(
             f"{_where(scenario, source)}: 図の中身が空です。\n"
             "  1 行に 1 つずつ、図に出す項目を書いてください。"
         )
-    if len(items) > MAX_DIAGRAM_ITEMS:
+    # 階段図の `←` は箱ではないので、数に入れない(数えるのは
+    # 「1 つ 1 つが小さくなるか」なので、箱の数で決まる)。
+    boxes = len(step_parts(items).levels) if shape == DIAGRAM_STEPS else len(items)
+    if boxes > MAX_DIAGRAM_ITEMS:
         warnings.append(
-            f"{_where(scenario, source)}: 図の項目が {len(items)} 個あります"
+            f"{_where(scenario, source)}: 図の項目が {boxes} 個あります"
             f"（1 枚に収まるのは {MAX_DIAGRAM_ITEMS} 個程度です）。"
         )
     if shape == DIAGRAM_BOUNDARY:
         _check_boundary(scenario, source, items)
     if shape == DIAGRAM_LANES:
         _check_lanes(scenario, source, items)
+    if shape == DIAGRAM_STEPS:
+        _check_steps(scenario, source, items)
     return Content(kind=KIND_DIAGRAM, diagram_shape=shape, diagram_items=items)
 
 
@@ -734,6 +741,53 @@ def _check_lanes(scenario: Scenario, source: ScenarioSlide, items: List[str]) ->
                 f"  ↑ {ret.label}\n"
                 "  戻りは「どの手順から戻るか」なので、その手順の次の行に書いてください。"
             )
+
+
+def _check_steps(scenario: Scenario, source: ScenarioSlide, items: List[str]) -> None:
+    """階段図の書き方を確かめる。
+
+    境界図・レーン図と同じ考え方で、**図が決まらない書き方は資料にする前に
+    止める。** 段が 1 つしかない図は階段ではなく、到達点が同じ段に 2 つ付くと
+    札が重なる。どちらも黙って描くと、画像を目で見るまで気付けない。
+    """
+    parts = step_parts(items)
+    where = _where(scenario, source)
+    if parts.bad:
+        raise ScenarioError(
+            f"{where}: 階段図に、段の名前が書かれていない行があります。\n"
+            f"  {parts.bad[0]}\n"
+            "  1 行を「段の名前: 中身」の形で書いてください。\n"
+            "  例: Lv1: それっぽい指摘を出す"
+        )
+    if parts.wrong:
+        raise ScenarioError(
+            f"{where}: 階段図に ↓ ↑ の行があります。\n"
+            f"  {parts.wrong[0]}\n"
+            "  段のつながりは書いた順から決まります。"
+            "書けるのは ←(どこまで届いたか)だけです。"
+        )
+    if len(parts.levels) < 2:
+        raise ScenarioError(
+            f"{where}: 階段図の段が {len(parts.levels)} つしかありません。\n"
+            "  段は 2 つ以上にしてください"
+            "（1 つでは、深くなっていくことを示せません）。"
+        )
+    seen = set()
+    for reach in parts.reaches:
+        if reach.after < 0:
+            raise ScenarioError(
+                f"{where}: 階段図の ← の行が、段より前にあります。\n"
+                f"  ← {reach.label}\n"
+                "  到達点は「どの段まで届いたか」なので、その段の次の行に書いてください。"
+            )
+        if reach.after in seen:
+            raise ScenarioError(
+                f"{where}: 階段図の同じ段に、到達点が 2 つ書かれています。\n"
+                f"  ← {reach.label}\n"
+                "  札が重なるので、1 行にまとめて書いてください。\n"
+                "  例: ← Haiku4.5 / Codex reasoning medium"
+            )
+        seen.add(reach.after)
 
 
 def _text_part(texts: List[object]) -> Content:

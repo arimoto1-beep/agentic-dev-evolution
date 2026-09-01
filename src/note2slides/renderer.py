@@ -21,6 +21,7 @@ from .layout import Box
 from .model import (
     DIAGRAM_BOUNDARY,
     DIAGRAM_LANES,
+    DIAGRAM_STEPS,
     DIAGRAM_FLOW_ACROSS,
     DIAGRAM_FRAME,
     KIND_CODE,
@@ -46,6 +47,7 @@ from .model import (
     boundary_parts,
     lane_parts,
     shape_name,
+    step_parts,
 )
 from .style import SLIDE_HEIGHT_EMU, SLIDE_WIDTH_EMU, Style, inches_to_pt
 
@@ -736,6 +738,13 @@ class Renderer:
             _no_outline(outer)
             self._draw_lanes(pptx_slide, content, geometry, left, top)
             return
+        if content.diagram_shape == DIAGRAM_STEPS:
+            # 階段図も同じ。主役は段のずれ方で、外枠を描くとずれが枠に
+            # 埋もれて「ただ縦に並んだ箱」に見える。
+            outer.fill.background()
+            _no_outline(outer)
+            self._draw_steps(pptx_slide, content, geometry, left, top)
+            return
         if frame_shape:
             # 枠図では、この外枠が図そのもの(何が中に入っているかを示す)。
             _paint(outer, style.color_code_bg)
@@ -974,6 +983,142 @@ class Renderer:
                 align=PP_ALIGN.CENTER,
                 anchor=MSO_ANCHOR.MIDDLE,
             )
+
+    # -- 階段図 ----------------------------------------------------------
+    #: 階段図の図形に付ける名前。narration が案内文を組み立て直すときに読む。
+    STEP_BADGE = "step-badge"
+    STEP_BODY = "step-body"
+    STEP_REACH = "step-reach"
+
+    def _draw_steps(
+        self, pptx_slide, content: Content, geometry, left: float, top: float
+    ) -> None:
+        """階段図を描く。段を上から下へ、1 段ずつ右へずらして積む。
+
+        **ずらす幅が図の主題** で、縦に積むだけなら流れ図と同じものになる。
+        段と段のあいだには蹴込み(riser)を入れて、離れた箱ではなく
+        1 つながりの階段に見えるようにする。
+
+        到達点(`←`)は、右の帯に札を置き、その段の右端まで矢印を引く。
+        帯の左端を全部の段でそろえるのは、**どこまで届いたかを縦に見比べる**
+        ためで、そろっていないと段の長さの違いに見える。
+        """
+        parts = step_parts(content.diagram_items)
+        if not parts.levels:
+            return
+        style = self.style
+        item_w = geometry.item_width
+        item_h = geometry.item_height
+        gap = geometry.gap
+        offset = geometry.offset
+        badge = geometry.badge
+
+        def row(index: int):
+            return left + offset * index, top + index * (item_h + gap)
+
+        for index, level in enumerate(parts.levels):
+            x, y = row(index)
+            if index > 0:
+                self._draw_step_riser(pptx_slide, x, y - gap, gap, geometry)
+            # 札 -> 中身 の順に置く。narration は図形の並び順で読み直すので、
+            # ここの順がそのまま「Lv1: それっぽい指摘を出す」に戻る。
+            self._draw_step_badge(pptx_slide, level.name, x, y, badge, item_h, geometry)
+            self._draw_diagram_item(
+                pptx_slide,
+                level.text,
+                x + badge,
+                y,
+                item_w - badge,
+                item_h,
+                geometry.font_pt,
+                language=self.STEP_BODY,
+            )
+            for reach in parts.reaches:
+                if reach.after == index:
+                    self._draw_step_reach(pptx_slide, reach, x + item_w, y, left, geometry)
+
+    def _draw_step_badge(
+        self, pptx_slide, name: str, x: float, y: float, width: float, height: float, geometry
+    ) -> None:
+        """段の名前の札。段そのものより先に読まれるので、地を塗って強くする。"""
+        style = self.style
+        shape = pptx_slide.shapes.add_shape(
+            MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(width), Inches(height)
+        )
+        shape.name = shape_name(SHAPE_DIAGRAM_ITEM, language=self.STEP_BADGE)
+        _paint(shape, style.color_accent)
+        _no_outline(shape)
+        self._fill_text(
+            shape.text_frame,
+            [[Run(name)]],
+            size=geometry.font_pt,
+            color=(0xFF, 0xFF, 0xFF),
+            bold=True,
+            align=PP_ALIGN.CENTER,
+            anchor=MSO_ANCHOR.MIDDLE,
+        )
+
+    def _draw_step_riser(self, pptx_slide, x: float, y: float, height: float, geometry) -> None:
+        """段と段をつなぐ蹴込み。次の段の左端から、上の段の底まで立てる。
+
+        これが無いと、ずらして置いた箱が **別々に浮いて** 見える。階段として
+        読めるかどうかは、段そのものではなくここで決まる。
+        """
+        style = self.style
+        thickness = max(0.02, style.diagram_lane_rule * geometry.scale)
+        shape = pptx_slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            Inches(x),
+            Inches(y),
+            Inches(thickness),
+            Inches(height),
+        )
+        shape.name = shape_name(SHAPE_DIAGRAM_ITEM)
+        _paint(shape, style.color_accent)
+        _no_outline(shape)
+
+    def _draw_step_reach(
+        self, pptx_slide, reach, right: float, y: float, left: float, geometry
+    ) -> None:
+        """到達点。右の帯に札を置き、その段の右端まで左向きの矢印を引く。
+
+        矢じりを段の縁まで届かせる(帯の中で止めると、どの段のことか
+        決まらない —— レーン図の戻りで直したのと同じところ)。
+        """
+        style = self.style
+        band_left = left + geometry.width - geometry.reach_band
+        thickness = min(0.26 * geometry.scale, geometry.item_height * 0.34)
+        length = max(0.12, band_left - right)
+        arrow = pptx_slide.shapes.add_shape(
+            MSO_SHAPE.LEFT_ARROW,
+            Inches(right),
+            Inches(y + (geometry.item_height - thickness) / 2),
+            Inches(length),
+            Inches(thickness),
+        )
+        arrow.name = shape_name(SHAPE_DIAGRAM_ITEM)
+        _paint(arrow, style.color_accent)
+        _no_outline(arrow)
+        if not reach.label:
+            return
+        label = pptx_slide.shapes.add_textbox(
+            Inches(band_left + geometry.reach_band * (1 - style.diagram_step_reach_ratio)),
+            Inches(y),
+            Inches(geometry.reach_band * style.diagram_step_reach_ratio),
+            Inches(geometry.item_height),
+        )
+        label.name = shape_name(SHAPE_DIAGRAM_ITEM, language=self.STEP_REACH)
+        frame = label.text_frame
+        frame.word_wrap = True
+        frame.vertical_anchor = MSO_ANCHOR.MIDDLE
+        _zero_insets(frame)
+        self._fill_text(
+            frame,
+            [[Run(reach.label)]],
+            size=geometry.font_pt * style.diagram_crossing_ratio,
+            color=style.color_accent,
+            align=PP_ALIGN.LEFT,
+        )
 
     def _draw_lane_arrow(
         self, pptx_slide, parts, geometry, col_x, index: int, band_top: float

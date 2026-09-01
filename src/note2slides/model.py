@@ -137,7 +137,17 @@ DIAGRAM_BOUNDARY = "boundary"
 #: 流れ・枠・境界のどれでも書けないのは「順番と担当を同時に言う」ことで、
 #: 担当が変わるところで矢印が線をまたぐ。全体像の 1 枚に使う。
 DIAGRAM_LANES = "lanes"
-DIAGRAM_SHAPES = (DIAGRAM_FLOW, DIAGRAM_FRAME, DIAGRAM_BOUNDARY, DIAGRAM_LANES)
+#: 段を上から下へ 1 段ずつずらして積み、**どこまで届いたか** を段の横に置く図。
+#: 流れ・枠・境界・レーンのどれでも書けないのは「同じ物差しの上で、届いた高さ
+#: (深さ)が違う」ことで、流れは順番しか言えず、境界は 2 段しか作れない。
+DIAGRAM_STEPS = "steps"
+DIAGRAM_SHAPES = (
+    DIAGRAM_FLOW,
+    DIAGRAM_FRAME,
+    DIAGRAM_BOUNDARY,
+    DIAGRAM_LANES,
+    DIAGRAM_STEPS,
+)
 #: 境界図で「線をまたぐもの」を書くときに行の先頭に置く印。上から下へ渡るものが
 #: `↓`、下から上へ戻るものが `↑`。シナリオに書く印と、資料に残す印と、
 #: 案内文が読み取る印を同じにしておく(3 か所で別々の書き方をすると、
@@ -160,7 +170,13 @@ DIAGRAM_LANGS = {
     "boundary": DIAGRAM_BOUNDARY,
     "レーン": DIAGRAM_LANES,
     "lanes": DIAGRAM_LANES,
+    "階段": DIAGRAM_STEPS,
+    "steps": DIAGRAM_STEPS,
 }
+
+#: 階段図で「どこまで届いたか」を書くときに行の先頭に置く印。段は右下がりに
+#: 並び、届いた印は段の右側に置くので、矢印は左を向く(印と絵の向きを揃える)。
+REACH_MARK = "←"
 
 #: レーン図で「誰が」と「何を」を分ける印。全角と半角のどちらでも書ける
 #: (日本語で書いていると、コロンだけ半角にするのは間違えやすい)。
@@ -310,6 +326,74 @@ def _split_lane(text: str) -> Tuple[Optional[str], str]:
 def lane_index(parts: "LaneParts", lane: str) -> int:
     """そのレーンが左(0)か右(1)か。"""
     return parts.lanes.index(lane) if lane in parts.lanes else 0
+
+
+@dataclass(frozen=True)
+class StepLevel:
+    """階段図の 1 段。`name` が段の名前(札)、`text` が段に出る文字。"""
+
+    name: str
+    text: str
+
+
+@dataclass(frozen=True)
+class StepReach:
+    """階段図の到達点。`after` 番目の段まで届いた、という印。"""
+
+    after: int
+    label: str
+
+
+@dataclass(frozen=True)
+class StepParts:
+    """階段図の行を、段と到達点に分けたもの。
+
+    `bad` と `wrong` は書き方の誤り(呼び出し側がエラーにする)。レーン図と
+    同じで、落とさずに残す —— どの行が悪いのかをそのまま人に見せられるように。
+    """
+
+    levels: List["StepLevel"]
+    reaches: List["StepReach"]
+    #: 段の名前が書かれていない行(`:` が無い)。
+    bad: List[str] = field(default_factory=list)
+    #: `↓` `↑` で始まる行。階段図では段のつながりは書いた順から決まるので、
+    #: 境界図・レーン図の印は使えない。
+    wrong: List[str] = field(default_factory=list)
+
+
+def step_parts(items: List[str]) -> "StepParts":
+    """階段図の行を、段と到達点に分ける。
+
+    1 行は `段の名前: 中身` で、**書いた順に上から下へ** 1 段ずつ深くなる
+    (レーン図の `レーン名: 手順` と同じ書き方・同じ区切り記号にしてある。
+    覚えることを増やさないため)。
+
+    `← ラベル` の行は到達点で、**その行の直前の段まで届いた** ことを表す。
+    位置が意味を持つのは境界図の `↓` `↑`、レーン図の `↑` と同じ考え方で、
+    どの段に付けるかを別に書かせない。
+    """
+    levels: List[StepLevel] = []
+    reaches: List[StepReach] = []
+    bad: List[str] = []
+    wrong: List[str] = []
+    for line in items:
+        text = line.strip()
+        if not text:
+            continue
+        if text.startswith(REACH_MARK):
+            reaches.append(
+                StepReach(after=len(levels) - 1, label=text[len(REACH_MARK) :].strip())
+            )
+            continue
+        if text[0] in CROSSING_MARKS:
+            wrong.append(text)
+            continue
+        name, body = _split_lane(text)
+        if name is None:
+            bad.append(text)
+            continue
+        levels.append(StepLevel(name=name, text=body))
+    return StepParts(levels=levels, reaches=reaches, bad=bad, wrong=wrong)
 
 BULLET = "bullet"
 NUMBER = "number"

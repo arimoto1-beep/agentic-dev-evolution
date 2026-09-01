@@ -33,8 +33,10 @@ from .model import (
     DIAGRAM_FLOW_ACROSS,
     DIAGRAM_FRAME,
     DIAGRAM_LANES,
+    DIAGRAM_STEPS,
     boundary_parts,
     lane_parts,
+    step_parts,
 )
 
 #: 画面を指す言い方。「続き」は、1 枚に収まらず次のスライドへ分かれた場合。
@@ -257,6 +259,8 @@ def describe_diagram(shape: str, items: Sequence[str]) -> str:
         return _describe_boundary(values)
     if shape == DIAGRAM_LANES:
         return _describe_lanes(values)
+    if shape == DIAGRAM_STEPS:
+        return _describe_steps(values)
     if shape == DIAGRAM_FRAME:
         return f"{IMAGE_LEAD}枠の中には、{_enumerate(values)}が入っています。"
     if len(values) == 1:
@@ -318,6 +322,30 @@ def _describe_lanes(values: List[str]) -> str:
         source = parts.steps[ret.after].lane
         target = parts.lanes[1] if source == parts.lanes[0] else parts.lanes[0]
         lines.append(f"{target}側へ戻るのは、{ret.label}です。")
+    return IMAGE_LEAD + "".join(lines)
+
+
+def _describe_steps(values: List[str]) -> str:
+    """階段図の画面を案内する文。
+
+    表・境界図・レーン図と同じで、**画面に出ている文字だけ** を読む。ただし
+    階段図は「上から下へ、1 段ずつ深くなる」ことに意味があるので、そこだけは
+    言い添える(段の順は画面から読み取れることで、書いた人にしか言えない
+    内容ではない)。
+
+    到達点は段の名前で言う。段の文をもう 1 度読むと、同じ文が 2 回出てきて、
+    どちらが到達点の話なのか聞き分けられない。
+    """
+    parts = step_parts(values)
+    if not parts.levels:
+        return ""
+    lines = ["上から下へ、だんだん深くなります。"]
+    for level in parts.levels:
+        lines.append(f"{level.name}、{level.text}。")
+    for reach in parts.reaches:
+        if not reach.label or not (0 <= reach.after < len(parts.levels)):
+            continue
+        lines.append(f"{parts.levels[reach.after].name}まで届いたのは、{reach.label}です。")
     return IMAGE_LEAD + "".join(lines)
 
 

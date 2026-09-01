@@ -25,6 +25,7 @@ from .model import (
     DIAGRAM_BOUNDARY,
     DIAGRAM_FRAME,
     DIAGRAM_LANES,
+    DIAGRAM_STEPS,
     KIND_CODE,
     KIND_DIAGRAM,
     KIND_IMAGE,
@@ -33,6 +34,7 @@ from .model import (
     Content,
     boundary_parts,
     lane_parts,
+    step_parts,
 )
 from .style import Style, inches_to_pt
 
@@ -166,6 +168,9 @@ class DiagramGeometry:
     gutter: float = 0.0  # レーン図で、左右のレーンのあいだ(inch)
     ret_band: float = 0.0  # レーン図で、戻りの矢印と札を置く帯の幅(inch。無ければ 0)
     ret_left: bool = True  # 戻りの帯を左に置くか(戻り先のレーンの側に置く)
+    offset: float = 0.0  # 階段図で、1 段ごとに右へずらす幅(inch)
+    badge: float = 0.0  # 階段図で、段の名前の札の幅(inch)
+    reach_band: float = 0.0  # 階段図で、到達点を置く帯の幅(inch。無ければ 0)
 
 
 def _max_diagram_scale(style: Style) -> float:
@@ -208,6 +213,8 @@ def diagram_geometry(
         return _boundary_geometry(content, style, width, height)
     if content.diagram_shape == DIAGRAM_LANES:
         return _lanes_geometry(content, style, width, height)
+    if content.diagram_shape == DIAGRAM_STEPS:
+        return _steps_geometry(content, style, width, height)
 
     horizontal = False
     if not frame and count > 1:
@@ -342,6 +349,75 @@ def _lanes_geometry(
     )
 
 
+def _steps_geometry(
+    content: Content, style: Style, width: float, height: Optional[float]
+) -> DiagramGeometry:
+    """階段図の並べ方と大きさ。
+
+    段は上から下へ 1 段ずつ、**右へずらしながら** 積む。ずらす幅が
+    「深くなっていくこと」そのものなので、向きは選べない(縦に積むだけの
+    形は流れ図と同じもので、深さが見えない)。
+
+    幅は「段の札 + 段の文字 + ずらした分 + 到達点の帯」。到達点が無ければ
+    帯は取らず、段だけで場所いっぱいに描く。
+    """
+    parts = step_parts(content.diagram_items)
+    levels = parts.levels
+    if not levels:
+        return DiagramGeometry(False, 0, 0, 0, 0, 0, 0, style.diagram_size, 1.0)
+
+    item_h = style.diagram_item_height
+    gap = style.diagram_step_gap
+    offset = style.diagram_step_offset
+    badge = _badge_width([lv.name for lv in levels], style)
+    # 段の箱は「札 + 中身」。中身の幅は、いちばん長い段の文字で決まる。
+    item_w = badge + _item_width([lv.text for lv in levels], style, style.diagram_size)
+    reach_band = _reach_band(parts, style)
+
+    stair_w = item_w + offset * max(0, len(levels) - 1)
+    reach_gap = style.diagram_step_reach_gap if parts.reaches else 0.0
+    natural_w = stair_w + reach_gap + reach_band
+    natural_h = len(levels) * item_h + max(0, len(levels) - 1) * gap
+
+    scale = 1.0
+    if height is not None and natural_w > 0 and natural_h > 0:
+        scale = min(width / natural_w, height / natural_h, _max_diagram_scale(style))
+    return DiagramGeometry(
+        horizontal=False,
+        item_width=item_w * scale,
+        item_height=item_h * scale,
+        gap=gap * scale,
+        padding=0.0,
+        width=natural_w * scale,
+        height=natural_h * scale,
+        font_pt=style.diagram_size * scale,
+        scale=scale,
+        offset=offset * scale,
+        badge=badge * scale,
+        reach_band=reach_band * scale,
+    )
+
+
+def _badge_width(names: List[str], style: Style) -> float:
+    """階段図の、段の名前の札の幅(inch)。長い名前が入るときだけ広げる。"""
+    widest = max((metrics.text_width_em(n) for n in names), default=0.0)
+    need = widest * style.diagram_size / 72.0 + style.diagram_item_padding
+    return max(style.diagram_step_badge, need)
+
+
+def _reach_band(parts, style: Style) -> float:
+    """階段図で、到達点の札と矢印を置く帯の幅(inch)。到達点が無ければ 0。
+
+    レーン図の戻りの札と同じ考え方で、およそ 2 行に収まる幅を取る。
+    """
+    if not parts.reaches:
+        return 0.0
+    widest = max((metrics.text_width_em(r.label) for r in parts.reaches), default=0.0)
+    line = widest / 2 * LABEL_SLACK * style.diagram_size * style.diagram_crossing_ratio / 72.0
+    band = line / style.diagram_step_reach_ratio
+    return min(style.diagram_step_reach_max, max(style.diagram_step_reach_min, band))
+
+
 #: 戻りの札を 2 行に収めるために、幅の見積りへ足す余裕。
 LABEL_SLACK = 1.15
 
@@ -391,6 +467,8 @@ def diagram_items(content: Content) -> List[str]:
         return parts.upper + parts.lower
     if content.diagram_shape == DIAGRAM_LANES:
         return [step.text for step in lane_parts(items).steps]
+    if content.diagram_shape == DIAGRAM_STEPS:
+        return [level.text for level in step_parts(items).levels]
     return items
 
 

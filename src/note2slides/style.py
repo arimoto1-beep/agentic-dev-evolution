@@ -212,6 +212,23 @@ class Style:
     diagram_lane_label_ratio: float = 0.68
     #: レーン図の縦線の太さ。境界図の線と同じ意味を持つので、同じ太さにする。
     diagram_lane_rule: float = 0.055
+    #: 階段図で、1 段ごとに右へずらす幅。ここが 0 だと段が縦に積まれるだけで、
+    #: 「深くなっていく」ことが見えない(それが図の主題なので)。
+    diagram_step_offset: float = 0.46
+    #: 階段図の、段と段のあいだ。流れ図より詰める。段はつながった 1 つの階段で、
+    #: 間が空くと「別々の箱が並んでいる」ように見える。
+    diagram_step_gap: float = 0.14
+    #: 階段図で、段の名前を出す札の幅。段の名前は短い符丁(Lv1 など)を想定する。
+    diagram_step_badge: float = 1.15
+    #: 階段図で、いちばん深い段の右端と、到達点の帯とのあいだ。ここを 0 に
+    #: すると **最下段だけ矢印が矢じりだけになり**、他の段より弱く見える
+    #: (いちばん深いところに届いたことが、いちばん見えない図になる)。
+    diagram_step_reach_gap: float = 0.62
+    #: 階段図で、到達点の札を置く帯の幅の下限と上限。札はこの帯の中で折り返す。
+    diagram_step_reach_min: float = 1.9
+    diagram_step_reach_max: float = 3.6
+    #: 到達点の帯のうち、札が使える割合(残りは段を指す矢印の置き場所)。
+    diagram_step_reach_ratio: float = 0.74
 
     def body_size(self, level: int) -> float:
         sizes = self.body_sizes
