@@ -33,8 +33,10 @@ from .model import (
     DIAGRAM_FLOW_ACROSS,
     DIAGRAM_FRAME,
     DIAGRAM_LANES,
+    DIAGRAM_PLACEMENT,
     DIAGRAM_STEPS,
     boundary_parts,
+    crossing_of,
     lane_parts,
     step_parts,
 )
@@ -261,6 +263,8 @@ def describe_diagram(shape: str, items: Sequence[str]) -> str:
         return _describe_lanes(values)
     if shape == DIAGRAM_STEPS:
         return _describe_steps(values)
+    if shape == DIAGRAM_PLACEMENT:
+        return _describe_placement(values)
     if shape == DIAGRAM_FRAME:
         return f"{IMAGE_LEAD}枠の中には、{_enumerate(values)}が入っています。"
     if len(values) == 1:
@@ -347,6 +351,28 @@ def _describe_steps(values: List[str]) -> str:
             continue
         lines.append(f"{parts.levels[reach.after].name}まで届いたのは、{reach.label}です。")
     return IMAGE_LEAD + "".join(lines)
+
+
+def _describe_placement(values: List[str]) -> str:
+    """配置図の画面を案内する文。
+
+    **画面に出ている名前だけ** を、左上から順に 1 度ずつ読む。「A の右に B」の
+    ような位置の言い直しはしない —— 升目の隣どうしを全部言うと長くなり、
+    どれが大事な関係かを選べるのは書いた人だけ。位置は絵に任せ、音では
+    **何が描かれているか** と **どちらが上か** だけを言う。
+    """
+    names: List[str] = []
+    lines: List[str] = []
+    for value in values:
+        mark = crossing_of(value)
+        if mark is None:
+            if value not in names:
+                names.append(value)
+        elif mark.label:
+            lines.append(f"図の{'下' if mark.down else '上'}が、{mark.label}です。")
+    if not names:
+        return ""
+    return IMAGE_LEAD + "".join(lines) + f"{_enumerate(names)}が描かれています。"
 
 
 def hold_for_diagram(items: Sequence[str]) -> float:

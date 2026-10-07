@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import unicodedata
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -471,7 +472,7 @@ def build_chapters(
     """
     chapters: List[Chapter] = []
     for slide in sorted(slides, key=lambda s: s.index):
-        title = slide.title.strip()
+        title = _chapter_title(slide.title)
         if not title:
             continue  # 見出しの無いスライドは前の章の続きとして扱う
         if chapters and chapters[-1].title == title:
@@ -483,6 +484,34 @@ def build_chapters(
     if chapters[0].start > 0:
         chapters[0] = replace(chapters[0], start=0.0)
     return _merge_short_chapters(chapters, total_duration, min_duration)
+
+
+def _chapter_title(title: str) -> str:
+    """資料の見出しを、章立ての 1 行にする。
+
+    章立ては **1 行 = 1 章** の形式で、行頭の時刻でしか章を見分けられない。
+    資料の見出しには改行が入ることがあり(表紙の題は収まる幅で折り返して
+    置かれる)、そのまま書き出すと時刻の無い行が混ざって、**章立て全体が
+    読めなくなる。** 見た目では分からず、投稿してはじめて気付く。
+
+    つなぎ直すときに空白を入れるかどうかは、折り返しの前後の文字で決める。
+    英語は語の切れ目(空白)で折り返すので空白が要るが、日本語は文字の
+    切れ目で折り返すので、空白を入れると題に無い空きができる。
+    """
+    parts = [part for part in (title or "").split("\n") if part.strip()]
+    if not parts:
+        return ""
+    joined = parts[0].strip()
+    for part in parts[1:]:
+        part = part.strip()
+        separator = "" if _is_wide(joined[-1]) and _is_wide(part[0]) else " "
+        joined += separator + part
+    return " ".join(joined.split())
+
+
+def _is_wide(char: str) -> bool:
+    """日本語のように、語の区切りに空白を使わない文字かどうか。"""
+    return unicodedata.east_asian_width(char) in ("W", "F", "A")
 
 
 def _merge_short_chapters(

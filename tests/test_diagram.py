@@ -22,6 +22,7 @@ from note2slides.model import (
     DIAGRAM_BOUNDARY,
     DIAGRAM_FLOW,
     DIAGRAM_LANES,
+    DIAGRAM_PLACEMENT,
     DIAGRAM_STEPS,
     DIAGRAM_FRAME,
     KIND_DIAGRAM,
@@ -36,6 +37,7 @@ from note2slides.model import (
     diagram_shape_of,
     lane_parts,
     parse_shape_name,
+    placement_parts,
     step_parts,
 )
 from note2slides.renderer import render_deck
@@ -1126,5 +1128,235 @@ def _step_plain(path: str):
             continue
         text = shape.text_frame.text if shape.has_text_frame else ""
         if not text.strip():
+            found.append(shape)
+    return found
+
+
+PLACEMENT = (
+    "```配置\n"
+    "↑ 車の前方\n"
+    "アーム | . | . | . | アーム\n"
+    "アーム | *横ビーム | 横ビーム | 横ビーム | アーム\n"
+    "アーム | . | . | . | アーム\n"
+    "後輪 | シャフト | デフ | シャフト | 後輪\n"
+    "```"
+)
+
+
+class TestThePlacementDiagram:
+    """配置図。升目に書いた位置へ、ものを置く。
+
+    流れ・枠・境界・レーン・階段はどれも **話の筋** を描く。「何がどこにあって、
+    何と隣り合っているか」は書けず、文を箱に入れて縦に並べるしかなかった
+    (人が gen34 の動画を見て「位置関係が分からない」と指摘したのがその画面)。
+
+    ここで確かめたいのは 5 つ。
+
+    * 書いた升目の位置が、そのまま描かれる位置になること
+    * 隣り合う同じ名前が 1 つのものになり、離れた同じ名前は別々のままなこと
+    * 隣り合うものが **すき間なく接する** こと(接していることが「つながり」)
+    * 升目の数え違いを、資料にする前に止めること(ずれた図は正しい図に見える)
+    * 強調と向きの印が、書いた人の指定どおりに出ること
+    """
+
+    @pytest.mark.parametrize("lang", ["配置", "placement", "PLACEMENT"])
+    def test_a_placement_block_becomes_a_placement_diagram(self, lang):
+        assert diagram_shape_of(lang) == DIAGRAM_PLACEMENT
+
+    def test_neighbours_with_the_same_name_are_one_thing(self):
+        parts = placement_parts(["柱 | 梁 | 梁 | 柱", "柱 | . | . | 柱"])
+        assert [(p.name, p.row, p.col, p.rows, p.cols) for p in parts.parts] == [
+            ("柱", 0, 0, 2, 1),
+            ("梁", 0, 1, 1, 2),
+            ("柱", 0, 3, 2, 1),
+        ]
+        assert (parts.rows, parts.cols) == (2, 4)
+
+    def test_the_same_name_apart_stays_two_things(self):
+        """左右に 1 本ずつある部品は、同じ名前のまま 2 つ描く。"""
+        parts = placement_parts(["軸 | 箱 | 軸"])
+        assert [(p.name, p.col) for p in parts.parts] == [("軸", 0), ("箱", 1), ("軸", 2)]
+
+    @pytest.mark.parametrize("line", ["柱｜梁｜柱", "柱|梁|柱", "柱 | 梁 | 柱"])
+    def test_the_separator_can_be_full_width_or_half_width(self, line):
+        assert [p.name for p in placement_parts([line]).parts] == ["柱", "梁", "柱"]
+
+    def test_the_mark_makes_the_whole_thing_strong(self):
+        """印は升目の 1 つに付ければよい(全部に付け忘れても半分だけ塗られない)。"""
+        parts = placement_parts(["柱 | *梁 | 梁 | 柱"])
+        assert [(p.name, p.strong) for p in parts.parts] == [
+            ("柱", False),
+            ("梁", True),
+            ("柱", False),
+        ]
+
+    def test_the_direction_is_not_a_cell(self):
+        parts = placement_parts(["↑ 北", "A | B", "↓ 入口"])
+        assert [(m.down, m.label) for m in parts.marks] == [(False, "北"), (True, "入口")]
+        assert (parts.rows, parts.cols) == (1, 2)
+
+    def test_only_the_things_are_counted_as_boxes(self):
+        content = Content(
+            kind=KIND_DIAGRAM,
+            diagram_shape=DIAGRAM_PLACEMENT,
+            diagram_items=["↑ 北", "柱 | 梁 | 梁 | 柱", "柱 | . | . | 柱"],
+        )
+        assert layout.diagram_items(content) == ["柱", "梁", "柱"]
+
+    @pytest.mark.parametrize(
+        "block, message",
+        [
+            ("```配置\nA | B | C\nA | B\n```", "升目の数が、行によって違います"),
+            ("```配置\nA | | C\n```", "空のままの升目があります"),
+            ("```配置\n| A | B |\n```", "空のままの升目があります"),
+            ("```配置\nA | A\nA | B\n```", "四角になっていません"),
+            ("```配置\n. | A\nA | A\n```", "四角になっていません"),
+            ("```配置\n→ 東\nA | B\n```", "← → の行があります"),
+            ("```配置\n↑\nA | B\n```", "向きの名前がありません"),
+            ("```配置\n↑ 北\n↑ 前\nA | B\n```", "↑ の行が 2 つあります"),
+            ("```配置\n↑ 北\n. | .\n```", "置くものが書かれていません"),
+        ],
+    )
+    def test_a_placement_that_cannot_be_drawn_is_refused(self, block, message):
+        """図が決まらない書き方は、資料にする前に止める。
+
+        配置図は位置そのものが内容なので、升目の数え違いは「少しずれた図」に
+        なって出る。崩れには見えず **正しい図に見える** ので、画像を見ても
+        気付けない(他の図解より悪い)。
+        """
+        with pytest.raises(ScenarioError) as error:
+            deck_of(screen(block))
+        assert message in str(error.value)
+
+    def test_a_fine_grid_is_warned_about(self):
+        row = " | ".join(f"部品{i}" for i in range(9))
+        deck = deck_of(screen(f"```配置\n{row}\n```"))
+        assert any("配置図の升目が 横 9 x 縦 1" in w for w in deck.warnings)
+
+    def test_many_things_on_a_coarse_grid_are_not_warned_about(self):
+        """他の図解の「項目は 6 個まで」は当てはめない。小さくなるのは升目の細かさ。"""
+        deck = deck_of(screen(PLACEMENT))
+        assert deck.warnings == []
+
+    def test_each_thing_is_drawn_where_it_was_written(self, tmp_path):
+        """升目の行と列が、そのまま上下・左右の位置になること。"""
+        boxes = _placement_boxes(self._render(tmp_path))
+        assert [b.text_frame.text for b in boxes] == [
+            "アーム", "アーム", "横ビーム", "後輪", "シャフト", "デフ", "シャフト", "後輪",
+        ]
+        arm_l, arm_r, beam, wheel_l, shaft_l, diff, shaft_r, wheel_r = boxes
+        # 左右: 同じ行の中で、書いた順に左から右へ
+        assert wheel_l.left < shaft_l.left < diff.left < shaft_r.left < wheel_r.left
+        # 上下: アームは車輪より上(前)、ビームはアームの途中
+        assert arm_l.top < beam.top < wheel_l.top
+        assert beam.top + beam.height < wheel_l.top
+        # またがる升目いっぱいに描く: アームは 3 段、ビームは 3 列
+        assert arm_l.height == pytest.approx(3 * wheel_l.height, rel=0.01)
+        assert beam.width == pytest.approx(3 * diff.width, rel=0.01)
+
+    def test_neighbours_touch_and_separated_things_do_not(self, tmp_path):
+        """接していることが「つながっている」。すき間があると並べた札に見える。"""
+        boxes = _placement_boxes(self._render(tmp_path))
+        arm_l, _, beam, wheel_l, shaft_l, diff, _, _ = boxes
+        slack = 2  # EMU の丸め
+        assert abs((arm_l.left + arm_l.width) - beam.left) <= slack
+        assert abs((arm_l.top + arm_l.height) - wheel_l.top) <= slack
+        assert abs((shaft_l.left + shaft_l.width) - diff.left) <= slack
+        # ビームとデフのあいだには `.` の段がある
+        assert diff.top - (beam.top + beam.height) >= diff.height - slack
+
+    def test_only_the_marked_thing_is_filled_strongly(self, tmp_path):
+        style = Style()
+        boxes = _placement_boxes(self._render(tmp_path))
+        accent = "%02X%02X%02X" % tuple(style.color_accent)
+        strong = [b.text_frame.text for b in boxes if str(b.fill.fore_color.rgb) == accent]
+        assert strong == ["横ビーム"]
+
+    def test_the_direction_is_drawn_above_the_grid(self, tmp_path):
+        path = self._render(tmp_path)
+        boxes = _placement_boxes(path)
+        labels = [s for s in _diagram_shapes(path) if parse_shape_name(s.name)[2] == "up"]
+        assert [s.text_frame.text for s in labels] == ["車の前方"]
+        assert labels[0].top + labels[0].height <= min(b.top for b in boxes) + 2
+
+    def test_the_estimate_matches_the_drawing(self, tmp_path):
+        """見積り(layout)と描画(renderer)が同じ大きさを使うこと。"""
+        path = self._render(tmp_path)
+        outer = [s for s in _diagram_shapes(path) if _kind(s) == SHAPE_DIAGRAM][0]
+        slack = 2
+        for shape in _diagram_shapes(path):
+            if _kind(shape) != SHAPE_DIAGRAM_ITEM:
+                continue
+            assert shape.left >= outer.left - slack
+            assert shape.left + shape.width <= outer.left + outer.width + slack
+            assert shape.top >= outer.top - slack
+            assert shape.top + shape.height <= outer.top + outer.height + slack
+
+    def test_the_grid_grows_taller_when_there_is_room(self):
+        """横幅で頭打ちになっても、縦に余りがあれば升目を伸ばす(平たい帯にしない)。"""
+        style = Style()
+        content = Content(
+            kind=KIND_DIAGRAM,
+            diagram_shape=DIAGRAM_PLACEMENT,
+            diagram_items=["タイヤ | 車軸 | デファレンシャル | 車軸 | タイヤ"],
+        )
+        natural = layout.diagram_geometry(content, style, 11.0)
+        roomy = layout.diagram_geometry(content, style, 11.0, 5.0)
+        assert roomy.item_height > natural.item_height * roomy.scale
+        assert roomy.item_height <= roomy.item_width * style.diagram_placement_aspect + 1e-6
+        assert roomy.height <= 5.0
+        assert layout.usable_height(content, style, 11.0) == pytest.approx(roomy.height)
+
+    def test_the_narration_names_each_thing_once(self):
+        """位置は絵に任せ、音では「何が描かれているか」と「どちらが上か」だけを言う。"""
+        text = guidance.describe_diagram(
+            DIAGRAM_PLACEMENT, ["アーム", "アーム", "横ビーム", "↑車の前方", "後輪", "後輪"]
+        )
+        assert text == (
+            "画面の図をご覧ください。"
+            "図の上が、車の前方です。"
+            "アーム、横ビーム、後輪が描かれています。"
+        )
+
+    def test_the_placement_survives_the_presentation(self, tmp_path):
+        prs = Presentation(self._render(tmp_path))
+        parts, _ = narration._screen_guidance(prs.slides[0])
+        assert parts == [
+            "画面の図をご覧ください。"
+            "図の上が、車の前方です。"
+            "アーム、横ビーム、後輪、シャフト、デフが描かれています。"
+        ]
+
+    def test_an_article_with_a_miscounted_grid_still_gets_a_figure(self, tmp_path):
+        """記事入力は確かめずに描く。数え違いがあっても図を消さない。"""
+        deck = Deck(
+            slides=[
+                Slide(
+                    kind=KIND_DIAGRAM,
+                    title="図",
+                    diagram_shape=DIAGRAM_PLACEMENT,
+                    diagram_items=["A | A | C", "A | B"],
+                )
+            ]
+        )
+        path = str(tmp_path / "ragged.pptx")
+        render_deck(deck, path, Style())
+        assert sorted(b.text_frame.text for b in _placement_boxes(path)) == ["A", "A", "A", "B", "C"]
+
+    def _render(self, tmp_path) -> str:
+        deck = deck_of(screen(PLACEMENT))
+        path = str(tmp_path / "placement.pptx")
+        render_deck(deck, path, Style())
+        return path
+
+
+def _placement_boxes(path: str):
+    """配置図に置かれたもの(名前を持つ四角)。向きの札は含めない。"""
+    found = []
+    for shape in _diagram_shapes(path):
+        kind, _, language = parse_shape_name(getattr(shape, "name", ""))
+        if kind != SHAPE_DIAGRAM_ITEM or language:
+            continue
+        if shape.has_text_frame and shape.text_frame.text.strip():
             found.append(shape)
     return found

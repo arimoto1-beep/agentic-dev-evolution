@@ -21,6 +21,7 @@ from .layout import Box
 from .model import (
     DIAGRAM_BOUNDARY,
     DIAGRAM_LANES,
+    DIAGRAM_PLACEMENT,
     DIAGRAM_STEPS,
     DIAGRAM_FLOW_ACROSS,
     DIAGRAM_FRAME,
@@ -38,6 +39,7 @@ from .model import (
     SHAPE_DIAGRAM,
     SHAPE_DIAGRAM_ITEM,
     SHAPE_FOOTER,
+    SHAPE_LABEL,
     SHAPE_TABLE,
     Bullet,
     Content,
@@ -46,6 +48,7 @@ from .model import (
     Slide,
     boundary_parts,
     lane_parts,
+    placement_parts,
     shape_name,
     step_parts,
 )
@@ -103,6 +106,15 @@ _THUMB_SUBTITLE_GAP = 0.26
 _THUMB_LABEL_GAP = 0.42
 _THUMB_LABEL_PADDING = 0.22
 _THUMB_TOP_MIN = 1.2
+
+# 本文の見出しの行の右端に置く札(inch / pt)。見出しより小さく、見出しの行の
+# 高さに収まる大きさにする。札は見出しの代わりではなく、添えるものなので、
+# 題より目立つことがあってはならない。
+_LABEL_SIZE = 16.0
+_LABEL_HEIGHT = 0.44
+_LABEL_PADDING = 0.2
+#: 札と見出しのあいだ。ここを詰めると、長い見出しが札に触れて読めなくなる。
+_LABEL_GAP = 0.3
 
 _SLIDE_WIDTH_IN = SLIDE_WIDTH_EMU / 914400
 _SLIDE_HEIGHT_IN = SLIDE_HEIGHT_EMU / 914400
@@ -197,7 +209,7 @@ class Renderer:
         else:
             pptx_slide = prs.slides.add_slide(prs.slide_layouts[_LAYOUT_TITLE_ONLY])
             self._paint_background(pptx_slide, self.style.theme.background)
-            self._draw_slide_title(pptx_slide, slide.title)
+            self._draw_slide_title(pptx_slide, slide.title, slide.label)
             self._draw_footer(pptx_slide, number)
             # 1 枚に 1 つでも複数でも、置き場所の決め方は同じ(`layout.fit`)。
             # スライド自身が中身を持つ場合は、1 つだけ並べたものとして扱う。
@@ -421,15 +433,21 @@ class Renderer:
         )
         return pptx_slide
 
-    def _draw_slide_title(self, pptx_slide, title: str) -> None:
+    def _draw_slide_title(self, pptx_slide, title: str, label: str = "") -> None:
         style, theme = self.style, self.style.theme
         title_ph = pptx_slide.shapes.title
+        # 札は見出しの行の右端に置く。見出しの箱はそのぶん狭くして、長い見出しが
+        # 札の下へ回り込まないようにする(重なりは画像を見るまで分からない)。
+        label_width = self._label_width(label) if label else 0.0
+        width = style.title_width - (label_width + _LABEL_GAP if label_width else 0.0)
+        if label_width:
+            self._draw_slide_label(pptx_slide, label, label_width)
         if title_ph is None:
             return
         if not title:
             _remove_shape(title_ph)
             return
-        _place(title_ph, style.title_left, style.title_top, style.title_width, style.title_height)
+        _place(title_ph, style.title_left, style.title_top, width, style.title_height)
         self._fill_text(
             title_ph.text_frame,
             [[Run(title)]],
@@ -467,6 +485,45 @@ class Renderer:
                 style.title_rule_height,
                 style.color_accent,
             )
+
+    @staticmethod
+    def _label_width(label: str) -> float:
+        return metrics.text_width_em(label) * _LABEL_SIZE / 72.0 + _LABEL_PADDING * 2
+
+    def _draw_slide_label(self, pptx_slide, label: str, width: float) -> None:
+        """見出しの行の右端に置く札。塗った箱に白抜きで入れる。
+
+        **この画面がどういう話なのか**(確認できた事実なのか、推測なのか)を、
+        画面そのものに残すための目印。ナレーションは流れて消えるので、
+        途中から見た人・画面を送った人には、画面に出ていないものは届かない。
+
+        中身は書いた人が決める。ここで種類ごとに色や形を変えないのは、
+        **描く側が意味を決めないため** で、それをやると札に書ける言葉が
+        あらかじめ決めた一覧に縛られる。
+        """
+        style = self.style
+        left = style.title_left + style.title_width - width
+        top = style.title_top + (style.title_height - _LABEL_HEIGHT) / 2
+        badge = pptx_slide.shapes.add_shape(
+            MSO_SHAPE.ROUNDED_RECTANGLE,
+            Inches(left),
+            Inches(top),
+            Inches(width),
+            Inches(_LABEL_HEIGHT),
+        )
+        # 画面に出るが読み上げない。ナレーション側がこの名前で除外する。
+        badge.name = shape_name(SHAPE_LABEL)
+        _paint(badge, style.color_accent)
+        _no_outline(badge)
+        self._fill_text(
+            badge.text_frame,
+            [[Run(label)]],
+            size=_LABEL_SIZE,
+            color=(0xFF, 0xFF, 0xFF),
+            bold=True,
+            align=PP_ALIGN.CENTER,
+            anchor=MSO_ANCHOR.MIDDLE,
+        )
 
     def _draw_footer(self, pptx_slide, number: int) -> None:
         """下端に、資料名(左)とページ番号(右)を小さく置く。"""
@@ -744,6 +801,12 @@ class Renderer:
             outer.fill.background()
             _no_outline(outer)
             self._draw_steps(pptx_slide, content, geometry, left, top)
+            return
+        if content.diagram_shape == DIAGRAM_PLACEMENT:
+            # 配置図も同じ。外枠を描くと、それも「置かれているもの」の 1 つに見える。
+            outer.fill.background()
+            _no_outline(outer)
+            self._draw_placement(pptx_slide, content, geometry, left, top)
             return
         if frame_shape:
             # 枠図では、この外枠が図そのもの(何が中に入っているかを示す)。
@@ -1118,6 +1181,106 @@ class Renderer:
             size=geometry.font_pt * style.diagram_crossing_ratio,
             color=style.color_accent,
             align=PP_ALIGN.LEFT,
+        )
+
+    # -- 配置図 ----------------------------------------------------------
+    def _draw_placement(
+        self, pptx_slide, content: Content, geometry, left: float, top: float
+    ) -> None:
+        """配置図を描く。升目に書かれた位置へ、ものを四角として置く。
+
+        **隣り合うものは、すき間を空けずに接して描く。** すき間があると
+        「並べた札」に見え、つながっていることが読めない。離れているものは、
+        書いた人が `.` を挟んで離す。角を丸めないのも同じ理由(丸めると、
+        接しているはずの角に穴が開く)。
+
+        ものには薄い地を付ける。白のままだと、ものに囲まれた **何も無い場所** が
+        輪郭に囲まれて、もう 1 つの箱に見える。
+
+        強調(`*`)は地を濃く塗る。どれを強調するかは書いた人が決めたもので、
+        描く側は名前の意味を見ない。
+        """
+        parts = placement_parts(content.diagram_items)
+        if not parts.parts:
+            return
+        style = self.style
+        cell_w = geometry.item_width
+        cell_h = geometry.item_height
+        ups = [mark for mark in parts.marks if not mark.down]
+        downs = [mark for mark in parts.marks if mark.down]
+        grid_top = top + (geometry.band if ups else 0.0)
+        for part in parts.parts:
+            shape = pptx_slide.shapes.add_shape(
+                MSO_SHAPE.RECTANGLE,
+                Inches(left + part.col * cell_w),
+                Inches(grid_top + part.row * cell_h),
+                Inches(part.cols * cell_w),
+                Inches(part.rows * cell_h),
+            )
+            shape.name = shape_name(SHAPE_DIAGRAM_ITEM)
+            _paint(shape, style.color_accent if part.strong else style.color_code_bg)
+            _outline(shape, style.color_accent, style.diagram_placement_outline)
+            self._fill_text(
+                shape.text_frame,
+                [[Run(part.name)]],
+                size=geometry.font_pt,
+                color=(0xFF, 0xFF, 0xFF) if part.strong else style.color_body,
+                bold=part.strong,
+                align=PP_ALIGN.CENTER,
+                anchor=MSO_ANCHOR.MIDDLE,
+            )
+        width = parts.cols * cell_w
+        if ups:
+            self._draw_placement_mark(pptx_slide, ups, left, top, width, geometry)
+        if downs:
+            self._draw_placement_mark(
+                pptx_slide, downs, left, grid_top + parts.rows * cell_h, width, geometry
+            )
+
+    def _draw_placement_mark(
+        self, pptx_slide, marks, left: float, top: float, width: float, geometry
+    ) -> None:
+        """向きの印。図の上か下の帯の中央に、矢印と札を並べて置く。
+
+        これが無いと、見ている人は **どちらが前(北・入口・上流)かを決められない。**
+        位置を描く図なのに、向きだけがナレーション頼みになる。
+        """
+        style = self.style
+        down = marks[0].down
+        label_text = " / ".join(mark.label for mark in marks if mark.label)
+        size = geometry.font_pt * style.diagram_crossing_ratio
+        arrow_w = style.diagram_crossing_arrow * geometry.scale
+        arrow_h = geometry.band * 0.7
+        gap = arrow_w * 0.6
+        label_w = min(
+            max(0.3, width - arrow_w - gap),
+            metrics.text_width_em(label_text) * size / 72.0 * 1.15 + 0.1,
+        )
+        start = left + (width - (arrow_w + gap + label_w)) / 2
+        arrow = pptx_slide.shapes.add_shape(
+            MSO_SHAPE.DOWN_ARROW if down else MSO_SHAPE.UP_ARROW,
+            Inches(start),
+            Inches(top + (geometry.band - arrow_h) / 2),
+            Inches(arrow_w),
+            Inches(arrow_h),
+        )
+        arrow.name = shape_name(SHAPE_DIAGRAM_ITEM)
+        _paint(arrow, style.color_accent)
+        _no_outline(arrow)
+        if not label_text:
+            return
+        label = pptx_slide.shapes.add_textbox(
+            Inches(start + arrow_w + gap), Inches(top), Inches(label_w), Inches(geometry.band)
+        )
+        # 向きは案内文でも使うので、境界図と同じ名前で残す(narration が読む)。
+        label.name = shape_name(SHAPE_DIAGRAM_ITEM, language="down" if down else "up")
+        self._fill_text(
+            label.text_frame,
+            [[Run(label_text)]],
+            size=size,
+            color=style.color_accent,
+            align=PP_ALIGN.LEFT,
+            anchor=MSO_ANCHOR.MIDDLE,
         )
 
     def _draw_lane_arrow(

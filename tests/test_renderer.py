@@ -4,6 +4,7 @@ import re
 
 import pytest
 from pptx import Presentation
+from pptx.util import Inches
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.oxml.ns import qn
 
@@ -235,3 +236,71 @@ def test_line_break_inside_a_paragraph_is_a_real_break(tmp_path):
     assert [r.text for r in body.runs] == ["文章", "↓", "トークン"]
     # python-pptx は <a:br/> を垂直タブとして読み直す(読み上げ側はここで行を分ける)。
     assert body.text == "文章\v↓\vトークン"
+
+
+def test_label_is_placed_at_the_right_of_the_title_row(tmp_path):
+    """見出しの行の右端に札を置き、見出しの箱はそのぶん狭くする。
+
+    札と見出しが重なっても、画像を目で見るまで気付けない。重ならないことを
+    ここで押さえておく。
+    """
+    from note2slides.model import SHAPE_LABEL
+    from note2slides.scenario import build_deck, parse_scenario
+    from note2slides.style import Style
+
+    body = (
+        "---\ntype: scenario\ntitle: 札\n---\n\n"
+        "## 見出しのある画面\n\n### 設定\n- 札: 未確認\n\n### 画面\n本文\n\n"
+        "## 札のない画面\n\n### 画面\n本文\n"
+    )
+    deck = build_deck(parse_scenario(body, source_path="lesson.md"))
+    out = tmp_path / "label.pptx"
+    render_deck(deck, str(out))
+
+    prs = Presentation(str(out))
+    labelled, plain = prs.slides[0], prs.slides[1]
+    badge = next(
+        sh
+        for sh in labelled.shapes
+        if parse_shape_name(sh.name)[0] == SHAPE_LABEL
+    )
+    assert badge.text_frame.text == "未確認"
+
+    style = Style()
+    right = Inches(style.title_left + style.title_width)
+    assert badge.left + badge.width == pytest.approx(right, abs=Inches(0.02))
+    title = labelled.shapes.title
+    assert title.left + title.width <= badge.left  # 見出しは札に重ならない
+    # 札のない画面では、見出しが版面の幅をそのまま使う。
+    assert plain.shapes.title.width > title.width
+    assert not any(
+        parse_shape_name(sh.name)[0] == SHAPE_LABEL for sh in plain.shapes
+    )
+
+
+def test_label_is_not_read_aloud(tmp_path):
+    """札は画面に出るが、読み上げない(書いた人がナレーションで言う)。
+
+    ナレーションを書かなかった画面では、画面に出ている文字から案内文を組み立てる。
+    そこに札が混ざると、どの画面でも「未確認」とだけ先に読まれることになる。
+    """
+    from note2slides import narration
+    from note2slides.model import Deck, Slide, KIND_TABLE
+
+    deck = Deck(title="札")
+    deck.slides.append(
+        Slide(
+            kind=KIND_TABLE,
+            title="見出し",
+            label="未確認",
+            table_header=["列"],
+            table_rows=[["値"]],
+        )
+    )
+    out = tmp_path / "label_audio.pptx"
+    render_deck(deck, str(out))
+
+    script = narration.extract_script(str(out))
+    text = script.segments[0].text
+    assert "見出し" in text
+    assert "未確認" not in text

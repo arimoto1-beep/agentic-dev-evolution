@@ -44,6 +44,7 @@ from .model import (
     SHAPE_DIAGRAM,
     SHAPE_DIAGRAM_ITEM,
     SHAPE_FOOTER,
+    SHAPE_LABEL,
     parse_shape_name,
 )
 
@@ -525,9 +526,13 @@ def _is_diagram_part(shape) -> bool:
 
 
 def _is_decoration(shape) -> bool:
-    """資料名・ページ番号のような、読み上げない飾りかどうか。"""
+    """資料名・ページ番号・見出しの札のような、読み上げない文字かどうか。
+
+    札は内容だが、**書いた人がナレーションでも言うもの** なので、ここから
+    読み足すと同じことが二度出る(画面の文字を代わりに読まないのと同じ線)。
+    """
     kind, _, _ = parse_shape_name(getattr(shape, "name", ""))
-    return kind == SHAPE_FOOTER
+    return kind in (SHAPE_FOOTER, SHAPE_LABEL)
 
 
 def _is_picture(shape) -> bool:

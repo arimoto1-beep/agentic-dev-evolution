@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from . import layout as layout_mod
+from . import metrics
 from . import narration as narration_mod
 from . import planner as planner_mod
 from .markdown_reader import parse_article, runs_text, split_front_matter
@@ -61,9 +62,11 @@ from .model import (
     Table,
     DIAGRAM_BOUNDARY,
     DIAGRAM_LANES,
+    DIAGRAM_PLACEMENT,
     DIAGRAM_STEPS,
     boundary_parts,
     lane_parts,
+    placement_parts,
     step_parts,
     diagram_shape_of,
 )
@@ -104,13 +107,21 @@ _SECTION_LABEL = {_SCREEN: "画面", _NARRATION: "ナレーション", _SETTINGS
 
 _KEY_LAYOUT = "layout"
 _KEY_HOLD = "hold"
+_KEY_BADGE = "label"
 _KEYS = {
     "レイアウト": _KEY_LAYOUT,
     "layout": _KEY_LAYOUT,
     "見る時間": _KEY_HOLD,
     "hold": _KEY_HOLD,
+    "札": _KEY_BADGE,
+    "label": _KEY_BADGE,
 }
-_KEY_LABEL = {_KEY_LAYOUT: "レイアウト", _KEY_HOLD: "見る時間"}
+_KEY_LABEL = {_KEY_LAYOUT: "レイアウト", _KEY_HOLD: "見る時間", _KEY_BADGE: "札"}
+
+#: 札に書ける長さ(全角の文字数に相当する幅)。見出しの行に置くので、長い札は
+#: 見出しそのものを押し出す。文ではなく **その画面がどういう話かを示す語** に
+#: するための上限で、超えたら書いた時点で止める。
+MAX_LABEL_WIDTH = 12.0
 
 _SLIDE_HEADING = re.compile(r"^##(?!#)\s*(.*)$")
 _SECTION_HEADING = re.compile(r"^###(?!#)\s*(.*)$")
@@ -144,6 +155,7 @@ class ScenarioSlide:
     screen: str = ""  # 画面セクションの Markdown(そのまま)
     narration: str = ""  # ナレーションセクションの Markdown(そのまま)
     hold: float = 0.0  # 読み終わったあとに画面を見せる時間(秒)
+    label: str = ""  # 見出しの行の右端に置く札
 
 
 @dataclass
@@ -372,8 +384,16 @@ class _Reader:
             value = value.strip()
             if key == _KEY_LAYOUT:
                 slide.layout = self._layout(number, value)
+            elif key == _KEY_BADGE:
+                slide.label = self._badge(number, value)
             else:
                 slide.hold = self._seconds(number, value)
+        if slide.label and slide.layout != LAYOUT_BODY:
+            raise ScenarioError(
+                f"{self._at(slide.line)}: {slide.layout}には札を置けません: {slide.label}\n"
+                f"  札は、見出しの行の右端に置くものです({LAYOUT_BODY}の画面だけに書けます)。\n"
+                f"  {slide.layout}でも同じことを言う場合は、見出しの文に書いてください。"
+            )
 
     def _layout(self, number: int, value: str) -> str:
         layout = _LAYOUTS.get(value.lower()) or _LAYOUTS.get(value)
@@ -384,6 +404,22 @@ class _Reader:
                 + " です(既定は " + LAYOUT_BODY + ")。"
             )
         return layout
+
+    def _badge(self, number: int, value: str) -> str:
+        """見出しの行の右端に置く札。長さだけを見る(中身は書いた人が決める)。"""
+        if not value:
+            raise ScenarioError(
+                f"{self._at(number)}: 札に何を書くかが空です。\n"
+                "  その画面がどういう話なのかを示す短い語を書いてください(例: `札: 未確認`)。"
+            )
+        if metrics.text_width_em(value) > MAX_LABEL_WIDTH:
+            raise ScenarioError(
+                f"{self._at(number)}: 札が長すぎます: {value}\n"
+                f"  全角 {MAX_LABEL_WIDTH:.0f} 文字ぶんまでです"
+                "(見出しの行に置くので、長い札は見出しを押し出します)。\n"
+                "  文を書きたい場合は、画面かナレーションに書いてください。"
+            )
+        return value
 
     def _seconds(self, number: int, value: str) -> float:
         match = _SECONDS.match(value)
@@ -466,10 +502,18 @@ def _build_slide(
     parts = _screen_parts(scenario, source, blocks, warnings)
     _warn_if_crowded(scenario, source, parts, style, warnings)
     if not parts:  # 見出しだけの画面
-        return Slide(kind=KIND_BULLETS, title=source.title, notes=notes)
+        return Slide(kind=KIND_BULLETS, title=source.title, label=source.label, notes=notes)
     if len(parts) == 1:
-        return parts[0].as_slide(title=source.title, notes=notes)
-    return Slide(kind=KIND_CONTENT, title=source.title, parts=parts, notes=notes)
+        slide = parts[0].as_slide(title=source.title, notes=notes)
+        slide.label = source.label
+        return slide
+    return Slide(
+        kind=KIND_CONTENT,
+        title=source.title,
+        label=source.label,
+        parts=parts,
+        notes=notes,
+    )
 
 
 def _screen_parts(
@@ -641,6 +685,9 @@ def _code_part(
 
 #: 1 枚に無理なく置ける図解の項目数。これを超えると 1 つ 1 つが小さくなる。
 MAX_DIAGRAM_ITEMS = 6
+#: 配置図の升目の数の目安。これより細かいと、名前が読めない大きさまで縮む。
+MAX_PLACEMENT_COLS = 7
+MAX_PLACEMENT_ROWS = 6
 
 
 def _diagram_part(
@@ -660,7 +707,10 @@ def _diagram_part(
     # 階段図の `←` は箱ではないので、数に入れない(数えるのは
     # 「1 つ 1 つが小さくなるか」なので、箱の数で決まる)。
     boxes = len(step_parts(items).levels) if shape == DIAGRAM_STEPS else len(items)
-    if boxes > MAX_DIAGRAM_ITEMS:
+    if shape == DIAGRAM_PLACEMENT:
+        # 配置図は「ものの数」ではなく升目の細かさで小さくなる。別に確かめる。
+        _check_placement(scenario, source, items, warnings)
+    elif boxes > MAX_DIAGRAM_ITEMS:
         warnings.append(
             f"{_where(scenario, source)}: 図の項目が {boxes} 個あります"
             f"（1 枚に収まるのは {MAX_DIAGRAM_ITEMS} 個程度です）。"
@@ -788,6 +838,72 @@ def _check_steps(scenario: Scenario, source: ScenarioSlide, items: List[str]) ->
                 "  例: ← Haiku4.5 / Codex reasoning medium"
             )
         seen.add(reach.after)
+
+
+def _check_placement(
+    scenario: Scenario, source: ScenarioSlide, items: List[str], warnings: List[str]
+) -> None:
+    """配置図の書き方を確かめる。
+
+    境界図・レーン図・階段図と同じ考え方で、**図が決まらない書き方は資料に
+    する前に止める。** 配置図は位置そのものが内容なので、升目の数え違いは
+    「少しずれた図」になって出る。それは崩れには見えず、**正しい図に見える。**
+    """
+    parts = placement_parts(items)
+    where = _where(scenario, source)
+    if parts.sideways:
+        raise ScenarioError(
+            f"{where}: 配置図に ← → の行があります。\n"
+            f"  {parts.sideways[0]}\n"
+            "  向きの印は ↑(図の上)か ↓(図の下)だけです。"
+            "示したい向きが上か下になるように、升目を書いてください。"
+        )
+    if parts.blank:
+        raise ScenarioError(
+            f"{where}: 配置図に、空のままの升目があります。\n"
+            f"  {parts.blank[0]}\n"
+            "  何も置かない升目には . を書いてください"
+            "（区切りの数え違いと見分けるためです）。\n"
+            "  例: 左の柱 | . | 右の柱"
+        )
+    if not parts.parts:
+        raise ScenarioError(
+            f"{where}: 配置図に、置くものが書かれていません。\n"
+            "  1 行を升目の 1 段として、| で区切って名前を書いてください。\n"
+            "  例: 左の柱 | 梁 | 梁 | 右の柱"
+        )
+    if parts.ragged:
+        raise ScenarioError(
+            f"{where}: 配置図の升目の数が、行によって違います"
+            f"（いちばん多い行は {parts.cols} 個）。\n"
+            f"  {parts.ragged[0]}\n"
+            "  どの行も同じ数に区切ってください。何も置かない升目には . を書きます。"
+        )
+    if parts.broken:
+        raise ScenarioError(
+            f"{where}: 配置図の「{parts.broken[0]}」が、四角になっていません。\n"
+            "  隣り合う同じ名前は 1 つのものとして描くので、"
+            "四角になるように並べてください。\n"
+            "  別々のものなら、あいだに . を置くか、名前を変えてください。"
+        )
+    for mark in parts.marks:
+        if not mark.label:
+            raise ScenarioError(
+                f"{where}: 配置図の {mark.mark} の行に、向きの名前がありません。\n"
+                "  例: ↑ 車の前方"
+            )
+    for down in (False, True):
+        if sum(1 for mark in parts.marks if mark.down == down) > 1:
+            raise ScenarioError(
+                f"{where}: 配置図に {'↓' if down else '↑'} の行が 2 つあります。\n"
+                "  図の上・下に書ける向きは、それぞれ 1 つです。"
+            )
+    if parts.cols > MAX_PLACEMENT_COLS or parts.rows > MAX_PLACEMENT_ROWS:
+        warnings.append(
+            f"{where}: 配置図の升目が 横 {parts.cols} x 縦 {parts.rows} あります"
+            f"（名前が読める大きさで収まるのは 横 {MAX_PLACEMENT_COLS} x "
+            f"縦 {MAX_PLACEMENT_ROWS} 程度です）。"
+        )
 
 
 def _text_part(texts: List[object]) -> Content:

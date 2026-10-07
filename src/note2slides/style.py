@@ -229,6 +229,19 @@ class Style:
     diagram_step_reach_max: float = 3.6
     #: 到達点の帯のうち、札が使える割合(残りは段を指す矢印の置き場所)。
     diagram_step_reach_ratio: float = 0.74
+    #: 配置図で、名前の左右に取る余白(この 2 倍が升目の幅に足される)。流れ図の
+    #: 箱より詰める。升目は横に何個も並ぶので、同じ余白を取ると名前が小さくなる。
+    diagram_placement_padding: float = 0.2
+    #: 配置図の升目 1 つの幅の下限。短い名前ばかりでも、升目が細い帯にならない。
+    diagram_placement_min_cell: float = 1.1
+    #: 配置図の升目の高さの上限(幅に対する割合)。場所が余っていれば升目を
+    #: 縦に伸ばすが、縦長にはしない(横に寝た図が、縦に引き伸ばされて見える)。
+    diagram_placement_aspect: float = 0.62
+    #: 配置図で、向きの印(`↑ 前` など)を置く帯の高さ。
+    diagram_placement_band: float = 0.5
+    #: 配置図の、ものの輪郭の太さ(pt)。隣り合うものは輪郭を共有して接するので、
+    #: 細いと境目が見えず、1 つの塊に見える。
+    diagram_placement_outline: float = 2.0
 
     def body_size(self, level: int) -> float:
         sizes = self.body_sizes

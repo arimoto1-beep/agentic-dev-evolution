@@ -141,12 +141,18 @@ DIAGRAM_LANES = "lanes"
 #: 流れ・枠・境界・レーンのどれでも書けないのは「同じ物差しの上で、届いた高さ
 #: (深さ)が違う」ことで、流れは順番しか言えず、境界は 2 段しか作れない。
 DIAGRAM_STEPS = "steps"
+#: 升目に書いたとおりの位置へ、もの(部品・部屋・機器など)を置く図。
+#: 流れ・枠・境界・レーン・階段はどれも **話の筋**(順番・包含・分かれ目・担当・
+#: 深さ)を描くもので、「何がどこにあって、何と隣り合っているか」は書けない。
+#: 文を箱に入れて並べても、位置は読む人が頭の中で組み立てることになる。
+DIAGRAM_PLACEMENT = "placement"
 DIAGRAM_SHAPES = (
     DIAGRAM_FLOW,
     DIAGRAM_FRAME,
     DIAGRAM_BOUNDARY,
     DIAGRAM_LANES,
     DIAGRAM_STEPS,
+    DIAGRAM_PLACEMENT,
 )
 #: 境界図で「線をまたぐもの」を書くときに行の先頭に置く印。上から下へ渡るものが
 #: `↓`、下から上へ戻るものが `↑`。シナリオに書く印と、資料に残す印と、
@@ -172,7 +178,20 @@ DIAGRAM_LANGS = {
     "lanes": DIAGRAM_LANES,
     "階段": DIAGRAM_STEPS,
     "steps": DIAGRAM_STEPS,
+    "配置": DIAGRAM_PLACEMENT,
+    "placement": DIAGRAM_PLACEMENT,
 }
+
+#: 配置図で、升目を横に区切る印。全角と半角のどちらでも書ける。
+PLACEMENT_SEPARATORS = ("|", "｜")
+#: 配置図で、何も置かない升目。**空のまま(`| |`)は書けない** ことにしてある。
+#: 区切りの数え違いと「わざと空けた」を、書いた時点で見分けるため。
+PLACEMENT_EMPTY = (".", "．")
+#: 配置図で、強調するものの名前の先頭に付ける印。どれを強調するかは書いた人が
+#: 決める(描く側が語の意味から色を選ぶことはしない。札と同じ線)。
+PLACEMENT_STRONG = ("*", "＊")
+#: 配置図に書けない向きの印(向きは上下にしか置けない)。
+PLACEMENT_SIDEWAYS = ("←", "→")
 
 #: 階段図で「どこまで届いたか」を書くときに行の先頭に置く印。段は右下がりに
 #: 並び、届いた印は段の右側に置くので、矢印は左を向く(印と絵の向きを揃える)。
@@ -395,6 +414,152 @@ def step_parts(items: List[str]) -> "StepParts":
         levels.append(StepLevel(name=name, text=body))
     return StepParts(levels=levels, reaches=reaches, bad=bad, wrong=wrong)
 
+
+
+@dataclass(frozen=True)
+class PlacedPart:
+    """配置図に置く 1 つのもの。升目の `row` 行 `col` 列から、`rows` x `cols` を占める。"""
+
+    name: str
+    row: int
+    col: int
+    rows: int = 1
+    cols: int = 1
+    strong: bool = False
+
+
+@dataclass(frozen=True)
+class PlacementParts:
+    """配置図の行を、置くもの・升目の大きさ・向きの印に分けたもの。
+
+    `ragged` `broken` `blank` `sideways` は書き方の誤り(呼び出し側がエラーにする)。
+    ここでは落とさずに、描ける形に直して残す —— 記事入力では確かめずに描くので、
+    誤りがあっても図が消えないようにする。
+    """
+
+    parts: List["PlacedPart"]
+    rows: int
+    cols: int
+    #: 図の上・下が何の向きか(`↑ 前` なら上が前)。境界図と同じ印を使う。
+    marks: List["Crossing"] = field(default_factory=list)
+    #: 升目の数が、いちばん長い行と合っていない行。
+    ragged: List[str] = field(default_factory=list)
+    #: 同じ名前が隣り合っているのに、四角にならないもの(L 字など)。
+    broken: List[str] = field(default_factory=list)
+    #: 空のままの升目がある行(`.` と書かれていない)。
+    blank: List[str] = field(default_factory=list)
+    #: `←` `→` で始まる行。
+    sideways: List[str] = field(default_factory=list)
+
+
+def _split_cells(text: str) -> List[str]:
+    for mark in PLACEMENT_SEPARATORS[1:]:
+        text = text.replace(mark, PLACEMENT_SEPARATORS[0])
+    return [cell.strip() for cell in text.split(PLACEMENT_SEPARATORS[0])]
+
+
+def _strong_name(cell: str) -> Tuple[str, bool]:
+    """升目の文字から、強調の印を外した名前と、印があったかどうかを返す。"""
+    for mark in PLACEMENT_STRONG:
+        if cell.startswith(mark):
+            return cell[len(mark) :].strip(), True
+    return cell, False
+
+
+def placement_parts(items: List[str]) -> "PlacementParts":
+    """配置図の行を読み取る。
+
+    1 行が升目の 1 段で、`|` で横に区切る。**書いた位置が、そのまま置く位置** に
+    なる(座標や「〜の右」を別に書かせない。見たままが図になる)。
+
+    * **同じ名前が隣り合っていれば、1 つのもの** として、またがる升目いっぱいに
+      描く。長いもの・大きいものは、名前を繰り返して書く。
+    * 離れた場所に同じ名前があれば、別々のもの(左右に 1 本ずつある部品など)。
+    * `.` は何も置かない升目。**隣り合うものは接して描かれる** ので、つながって
+      いないものの間には `.` を置く。
+    * `↑ ラベル` / `↓ ラベル` の行は升目ではなく、図の上・下がどちら向きかの印。
+    """
+    grid: List[List[str]] = []
+    sources: List[str] = []
+    marks: List[Crossing] = []
+    sideways: List[str] = []
+    blank: List[str] = []
+    for line in items:
+        text = line.strip()
+        if not text:
+            continue
+        if text[0] in PLACEMENT_SIDEWAYS:
+            sideways.append(text)
+            continue
+        mark = crossing_of(text)
+        if mark is not None:
+            marks.append(mark)
+            continue
+        cells = _split_cells(text)
+        if any(not cell for cell in cells):
+            blank.append(text)
+        grid.append(["" if cell in PLACEMENT_EMPTY else cell for cell in cells])
+        sources.append(text)
+
+    cols = max((len(row) for row in grid), default=0)
+    ragged = [src for src, row in zip(sources, grid) if len(row) != cols]
+    for row in grid:
+        row.extend([""] * (cols - len(row)))
+
+    parts: List[PlacedPart] = []
+    broken: List[str] = []
+    seen = [[False] * cols for _ in grid]
+    for r, row in enumerate(grid):
+        for c, cell in enumerate(row):
+            if not cell or seen[r][c]:
+                continue
+            name, _ = _strong_name(cell)
+            if not name:
+                seen[r][c] = True
+                continue
+            region = _region(grid, r, c, name)
+            strong = any(_strong_name(grid[y][x])[1] for y, x in region)
+            bottom = max(y for y, _ in region)
+            right = max(x for _, x in region)
+            if len(region) == (bottom - r + 1) * (right - c + 1) and all(x >= c for _, x in region):
+                for y, x in region:
+                    seen[y][x] = True
+                parts.append(PlacedPart(name, r, c, bottom - r + 1, right - c + 1, strong))
+            else:
+                # 四角にならない。升目 1 つずつに分けて残す(図からは消さない)。
+                if name not in broken:
+                    broken.append(name)
+                for y, x in sorted(region):
+                    seen[y][x] = True
+                    parts.append(PlacedPart(name, y, x, 1, 1, strong))
+    parts.sort(key=lambda part: (part.row, part.col))
+    return PlacementParts(
+        parts=parts,
+        rows=len(grid),
+        cols=cols,
+        marks=marks,
+        ragged=ragged,
+        broken=broken,
+        blank=blank,
+        sideways=sideways,
+    )
+
+
+def _region(grid: List[List[str]], row: int, col: int, name: str) -> List[Tuple[int, int]]:
+    """`(row, col)` から、同じ名前で隣り合っている升目をたどって集める。"""
+    found = {(row, col)}
+    stack = [(row, col)]
+    while stack:
+        y, x = stack.pop()
+        for ny, nx in ((y + 1, x), (y - 1, x), (y, x + 1), (y, x - 1)):
+            if (ny, nx) in found or not (0 <= ny < len(grid) and 0 <= nx < len(grid[ny])):
+                continue
+            if _strong_name(grid[ny][nx])[0] == name and grid[ny][nx]:
+                found.add((ny, nx))
+                stack.append((ny, nx))
+    return sorted(found)
+
+
 BULLET = "bullet"
 NUMBER = "number"
 QUOTE = "quote"
@@ -481,7 +646,8 @@ class Content:
 class Slide(Content):
     title: str = ""
     subtitle: str = ""
-    #: 左上に小さく出す短い文字(教材名・回数など)。サムネイルだけが使う。
+    #: 短く添える札。サムネイルでは左上(教材名・回数など)、本文の画面では
+    #: 見出しの行の右端に置く(その画面がどういう話なのかを示す目印)。
     label: str = ""
     notes: str = ""
     #: 1 枚に並べる中身(`KIND_CONTENT` のときだけ入る)。書かれた順に縦へ並ぶ。
@@ -519,6 +685,7 @@ class Slide(Content):
 #     code:bash       bash のコード
 #     table-continued 前のスライドから続いている表
 #     footer          資料名・ページ番号(読み上げない飾り)
+#     label           見出しの行の右端に置く札(読み上げない)
 
 SHAPE_CODE = "code"
 SHAPE_TABLE = "table"
@@ -529,6 +696,9 @@ SHAPE_DIAGRAM_ITEM = "diagram-item"
 #: 見た目のために置く文字(資料名・ページ番号)。画面には出るが、内容ではない
 #: ので読み上げない。ナレーション側(narration.py)がこの名前で除外する。
 SHAPE_FOOTER = "footer"
+#: 見出しの行の右端に置く札。画面に出るが、ナレーションは読み上げない
+#: (書いた人がナレーションで言う文字であって、機械が読み足すものではない)。
+SHAPE_LABEL = "label"
 _SHAPE_CONTINUED = "-continued"
 
 

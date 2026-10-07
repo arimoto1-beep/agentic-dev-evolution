@@ -299,6 +299,38 @@ def test_chapters_are_written_in_the_form_youtube_expects(tmp_path):
         assert f.read() == "0:00 はじめに\n1:15 本題\n1:02:05 まとめ\n"
 
 
+def test_a_wrapped_title_becomes_one_chapter_line():
+    """表紙の題は収まる幅で折り返して置かれる。その改行を章立てへ持ち込まない。
+
+    章立ては 1 行 = 1 章で、行頭の時刻でしか章を見分けられない。改行が混ざると
+    時刻の無い行ができて、**章立て全体が読めなくなる**(投稿するまで気付かない)。
+    """
+    slides = [
+        slide(1, 0.0, 20.0, [("表紙です。", 0.0)], title="「ド・ディオン式」なのに、\nどう見てもトーションビーム？"),
+        slide(2, 20.0, 20.0, [("本題です。", 0.0)], title="本題"),
+    ]
+
+    chapters = cap.build_chapters(slides, 40.0)
+
+    assert chapters[0].title == "「ド・ディオン式」なのに、どう見てもトーションビーム？"
+    assert cap.format_chapters(chapters).splitlines() == [
+        "0:00 「ド・ディオン式」なのに、どう見てもトーションビーム？",
+        "0:20 本題",
+    ]
+
+
+def test_a_wrapped_english_title_keeps_the_space_between_words():
+    """英語は語の切れ目(空白)で折り返す。つなぎ直すときは空白を戻す。"""
+    slides = [
+        slide(1, 0.0, 20.0, [("A.", 0.0)], title="How the chapters\nare written"),
+        slide(2, 20.0, 20.0, [("B.", 0.0)], title="Next"),
+    ]
+
+    chapters = cap.build_chapters(slides, 40.0)
+
+    assert chapters[0].title == "How the chapters are written"
+
+
 def test_no_titles_means_no_chapters():
     assert cap.build_chapters([slide(1, 0.0, 20.0, [("あ。", 0.0)])], 20.0) == []
 

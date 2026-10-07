@@ -295,6 +295,72 @@ class TestNarration:
         assert "ナレーション" in str(error.value)
 
 
+class TestLabel:
+    """見出しの行の右端に置く札。
+
+    画面に出ている文字だけが、途中から見た人・画面を送った人に届く。
+    「これは確認できた事実なのか、推測なのか」をナレーションだけに預けると、
+    音が流れて消えたあとには何も残らない。
+    """
+
+    def test_a_label_is_carried_to_the_slide(self):
+        deck = deck_of("## 見出し\n\n### 設定\n- 札: 未確認\n\n### 画面\n本文\n")
+
+        assert deck.slides[0].label == "未確認"
+
+    def test_a_label_can_be_written_in_english(self):
+        deck = deck_of("## 見出し\n\n### 設定\n- label: 推測\n\n### 画面\n本文\n")
+
+        assert deck.slides[0].label == "推測"
+
+    def test_a_screen_without_a_label_has_none(self):
+        deck = deck_of("## 見出し\n\n### 画面\n本文\n")
+
+        assert deck.slides[0].label == ""
+
+    def test_a_label_survives_a_screen_with_one_content(self):
+        """中身が 1 つの画面は `Content.as_slide` を通る。ここで落としやすい。"""
+        deck = deck_of("## 見出し\n\n### 設定\n- 札: 問い\n\n### 画面\n| A |\n| --- |\n| 1 |\n")
+
+        assert deck.slides[0].kind == KIND_TABLE
+        assert deck.slides[0].label == "問い"
+
+    def test_a_label_survives_a_screen_with_several_contents(self):
+        deck = deck_of(
+            "## 見出し\n\n### 設定\n- 札: 問い\n\n### 画面\n文章\n\n| A |\n| --- |\n| 1 |\n"
+        )
+
+        assert deck.slides[0].kind == KIND_CONTENT
+        assert deck.slides[0].label == "問い"
+
+    def test_a_label_on_a_cover_is_refused(self):
+        """表紙と章扉には見出しの行が無い。置き場所が決まらないので止める。"""
+        with pytest.raises(ScenarioError) as error:
+            deck_of("## 題名\n\n### 設定\n- レイアウト: 表紙\n- 札: 未確認\n")
+
+        assert "表紙" in str(error.value)
+        assert "本文" in str(error.value)
+
+    def test_a_label_on_a_section_is_refused(self):
+        with pytest.raises(ScenarioError) as error:
+            deck_of("## 章\n\n### 設定\n- レイアウト: 章扉\n- 札: 推測\n")
+
+        assert "章扉" in str(error.value)
+
+    def test_a_long_label_is_refused(self):
+        """長い札は見出しを押し出す。文を書く場所ではないので、書いた時点で止める。"""
+        with pytest.raises(ScenarioError) as error:
+            deck_of("## 見出し\n\n### 設定\n- 札: ここから先は確認できていません\n")
+
+        assert "長すぎます" in str(error.value)
+
+    def test_an_empty_label_is_refused(self):
+        with pytest.raises(ScenarioError) as error:
+            deck_of("## 見出し\n\n### 設定\n- 札:\n")
+
+        assert "札" in str(error.value)
+
+
 class TestMistakes:
     def test_text_outside_a_section_says_where_to_put_it(self):
         with pytest.raises(ScenarioError) as error:

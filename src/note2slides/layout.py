@@ -25,6 +25,7 @@ from .model import (
     DIAGRAM_BOUNDARY,
     DIAGRAM_FRAME,
     DIAGRAM_LANES,
+    DIAGRAM_PLACEMENT,
     DIAGRAM_STEPS,
     KIND_CODE,
     KIND_DIAGRAM,
@@ -34,6 +35,7 @@ from .model import (
     Content,
     boundary_parts,
     lane_parts,
+    placement_parts,
     step_parts,
 )
 from .style import Style, inches_to_pt
@@ -215,6 +217,8 @@ def diagram_geometry(
         return _lanes_geometry(content, style, width, height)
     if content.diagram_shape == DIAGRAM_STEPS:
         return _steps_geometry(content, style, width, height)
+    if content.diagram_shape == DIAGRAM_PLACEMENT:
+        return _placement_geometry(content, style, width, height)
 
     horizontal = False
     if not frame and count > 1:
@@ -398,6 +402,59 @@ def _steps_geometry(
     )
 
 
+def _placement_geometry(
+    content: Content, style: Style, width: float, height: Optional[float]
+) -> DiagramGeometry:
+    """配置図の並べ方と大きさ。
+
+    升目はすべて同じ大きさにする。列ごとに幅を変えると名前の長さで位置が
+    ずれ、**書いた升目と描かれた位置が合わなくなる**(位置が図の主題なので)。
+    幅は「いちばん窮屈なもの」に合わせる —— 2 升にまたがるものは、名前の
+    半分が 1 升に入ればよい。
+
+    場所が余っていれば升目を縦に伸ばす。他の図解は箱の高さを倍率でしか
+    変えないが、配置図は横に何升も並ぶので幅で頭打ちになりやすく、
+    そのままだと下が空いたまま平たい帯になる。
+    """
+    parts = placement_parts(content.diagram_items)
+    if not parts.parts:
+        return DiagramGeometry(False, 0, 0, 0, 0, 0, 0, style.diagram_size, 1.0)
+
+    need = max(
+        (
+            metrics.text_width_em(part.name) * style.diagram_size / 72.0
+            + 2 * style.diagram_placement_padding
+        )
+        / part.cols
+        for part in parts.parts
+    )
+    cell_w = max(style.diagram_placement_min_cell, need)
+    cell_h = style.diagram_item_height
+    band = style.diagram_placement_band
+    bands = band * len({mark.down for mark in parts.marks})
+    natural_w = parts.cols * cell_w
+    natural_h = parts.rows * cell_h + bands
+
+    scale = 1.0
+    if height is not None and natural_w > 0 and natural_h > 0:
+        scale = min(width / natural_w, height / natural_h, _max_diagram_scale(style))
+        spare = max(0.0, height - natural_h * scale)
+        tallest = max(cell_h, cell_w * style.diagram_placement_aspect)
+        cell_h = min(tallest, cell_h + spare / scale / parts.rows)
+    return DiagramGeometry(
+        horizontal=False,
+        item_width=cell_w * scale,
+        item_height=cell_h * scale,
+        gap=0.0,
+        padding=0.0,
+        width=natural_w * scale,
+        height=(parts.rows * cell_h + bands) * scale,
+        font_pt=style.diagram_size * scale,
+        scale=scale,
+        band=band * scale,
+    )
+
+
 def _badge_width(names: List[str], style: Style) -> float:
     """階段図の、段の名前の札の幅(inch)。長い名前が入るときだけ広げる。"""
     widest = max((metrics.text_width_em(n) for n in names), default=0.0)
@@ -469,6 +526,8 @@ def diagram_items(content: Content) -> List[str]:
         return [step.text for step in lane_parts(items).steps]
     if content.diagram_shape == DIAGRAM_STEPS:
         return [level.text for level in step_parts(items).levels]
+    if content.diagram_shape == DIAGRAM_PLACEMENT:
+        return [part.name for part in placement_parts(items).parts]
     return items
 
 
@@ -487,6 +546,10 @@ def diagram_height(content: Content, style: Style, width: float) -> float:
     return diagram_geometry(content, style, width).height
 
 
+#: 「高さの制約なし」として渡す値(inch)。画面より十分に大きければよい。
+_UNBOUNDED = 1000.0
+
+
 def usable_height(content: Content, style: Style, width: float) -> float:
     """その中身が **実際に使える** 高さの上限(inch)。
 
@@ -496,6 +559,10 @@ def usable_height(content: Content, style: Style, width: float) -> float:
     **図と次の中身のあいだの空白** になって現れる。
     """
     if content.kind == KIND_DIAGRAM:
+        if content.diagram_shape == DIAGRAM_PLACEMENT:
+            # 配置図は升目を縦にも伸ばすので、倍率だけでは上限が出ない。
+            # 高さを十分に渡したときの大きさを、そのまま上限にする。
+            return diagram_geometry(content, style, width, _UNBOUNDED).height
         geometry = diagram_geometry(content, style, width)
         if geometry.height <= 0:
             return 0.0
