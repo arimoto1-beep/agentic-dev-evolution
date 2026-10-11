@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import List, Optional
 
 from pptx import Presentation
@@ -181,6 +182,7 @@ class Renderer:
         # フッタ用。`render` が呼ばれたときに、デッキの内容で置き換える。
         self._deck_title = ""
         self._total = 1
+        self._output_dir = ""  # 絵の場所を相対パスで残すために持つ
 
     def render(self, deck: Deck, output_path: str) -> None:
         prs = Presentation()
@@ -191,6 +193,7 @@ class Renderer:
         # フッタ(資料名とページ番号)のために、全体の枚数と題を持っておく。
         self._deck_title = deck.title
         self._total = len(deck.slides)
+        self._output_dir = os.path.dirname(os.path.abspath(output_path))
 
         for number, slide in enumerate(deck.slides, start=1):
             self._render_slide(prs, slide, number)
@@ -1471,6 +1474,9 @@ class Renderer:
         # 真ん中に置く(図だけの画面で、下に大きな空きができるのを避ける)。
         spare = Inches(box.height) - picture.height - Inches(caption_space)
         picture.top = int(Inches(box.top) + max(0, spare) / 2)
+        # 絵のもとのファイルを、図形の説明に残す。動画にするときに、絵の隣にある
+        # 段の画像(`図@1.png` …)を探すのに使う(`staging.py`)。
+        picture._element.nvPicPr.cNvPr.set("descr", self._image_reference(content.image_path))
 
         if content.image_alt:
             top = picture.top + picture.height + Inches(0.1)
@@ -1484,6 +1490,18 @@ class Renderer:
                 color=style.color_muted,
                 align=PP_ALIGN.CENTER,
             )
+
+    def _image_reference(self, path: str) -> str:
+        """絵の場所を、資料から見た相対パスで書く(資料と一緒に動かせるように)。"""
+        base = getattr(self, "_output_dir", "")
+        if base:
+            try:
+                relative = os.path.relpath(path, base)
+            except ValueError:  # ドライブが違う
+                relative = ""
+            if relative and not relative.startswith(".."):
+                return relative.replace(os.sep, "/")
+        return os.path.abspath(path)
 
     # -- テキスト共通 ---------------------------------------------------
     def _fill_text(

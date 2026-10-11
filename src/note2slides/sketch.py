@@ -14,19 +14,26 @@
 * 資料と同じ書体・同じ色(`style.Style` から取る)
 * ずらす・傾ける(`at`)。同じ部品を、別の位置・別の傾きでもう一度描ける
 * 引き出し線の付いた名前(`label`)。絵の中のものに、その場で名前を付ける
+* 層(`layer`)。描いたものに名前を付けておき、あとから **出す層・目立たせる層を
+  選んで** 同じ絵を何通りにも書き出す。動画で、話に合わせて絵を 1 つずつ足したり、
+  いま話している部品だけを濃く残したりするのに使う(`save_step`。`staging.py`)
+* 動き(`save_motion`)。少しずつ変えた絵を連番で書き出す
 
 座標は左上が原点、右が +x、下が +y(単位は書き出す画像の画素)。
 """
 
 from __future__ import annotations
 
+import glob
 import math
 import os
+import shutil
 from contextlib import contextmanager
-from typing import Iterator, List, Optional, Sequence, Tuple
+from typing import Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
 
+from .staging import motion_dir, step_path
 from .style import Style
 
 Point = Tuple[float, float]
@@ -37,6 +44,10 @@ DEFAULT_SIZE = (2400, 1050)
 
 #: 何倍の大きさで描いてから縮めるか。
 SUPERSAMPLE = 2
+
+#: 目立たせない層を、どれだけの濃さで残すか(0 = 消す、1 = そのまま)。
+#: 消さないのは、いま話していない部品も「そこにある」ことは見えていてほしいため。
+FADED = 0.22
 
 _STYLE = Style()
 INK: Color = _STYLE.color_body
@@ -91,6 +102,11 @@ class Sketch:
         self._k = SUPERSAMPLE
         self._image = Image.new("RGB", (width * self._k, height * self._k), background)
         self._draw = ImageDraw.Draw(self._image)
+        # 層。使い始めるまでは空で、絵は上の 1 枚にそのまま描く(これまでと同じ)。
+        # 使い始めたら、描いた順に(名前, 透明な地の絵)を積む。名前の無い層は、
+        # 層の外で描いたもの(いつも出す)。
+        self._ground = self._image
+        self._layers: List[Tuple[str, Image.Image]] = []
         # いま効いている「ずらす・傾ける」。外側から順に積む。
         self._frames: List[Tuple[float, float, float, float]] = []
         self._fonts: dict = {}
@@ -108,6 +124,55 @@ class Sketch:
             yield
         finally:
             self._frames.pop()
+
+    # -- 層 ---------------------------------------------------------------
+    @contextmanager
+    def layer(self, name: str) -> Iterator[None]:
+        """この中で描くものを、`name` という層にまとめる。
+
+        層は描いた順に重なる。同じ名前でもう一度開くと、同じ層に描き足す
+        (重なりの順は、最初に開いたときのまま)。層の外で描いたものは、
+        どの書き出しでもそのまま出る。
+        """
+        if not name:
+            raise SketchError("層には名前を付けてください。")
+        outer = self._image
+        outer_named = any(image is outer and existing for existing, image in self._layers)
+        self._drop_empty_top()
+        self._target(self._named(name))
+        try:
+            yield
+        finally:
+            if outer_named:
+                self._target(outer)  # 層の中で開いた層。外側の層へ戻る
+            else:
+                # 層を閉じたあとに描くものは、この層より上に重なる。
+                self._layers.append(("", self._blank()))
+                self._target(self._layers[-1][1])
+
+    def layers(self) -> List[str]:
+        """付けた層の名前(描いた順)。"""
+        return list(dict.fromkeys(name for name, _ in self._layers if name))
+
+    def _blank(self) -> Image.Image:
+        return Image.new("RGBA", self._ground.size, (0, 0, 0, 0))
+
+    def _named(self, name: str) -> Image.Image:
+        for existing, image in self._layers:
+            if existing == name:
+                return image
+        self._layers.append((name, self._blank()))
+        return self._layers[-1][1]
+
+    def _target(self, image: Image.Image) -> None:
+        self._image = image
+        self._draw = ImageDraw.Draw(image)
+
+    def _drop_empty_top(self) -> None:
+        """何も描かれなかった名前なしの層を片付ける(層ごとに 1 枚ぶんの記憶を使う)。"""
+        if self._layers and not self._layers[-1][0] and self._layers[-1][1] is self._image:
+            if self._layers[-1][1].getbbox() is None:
+                self._layers.pop()
 
     def _map(self, point: Point) -> Point:
         x, y = point
@@ -316,6 +381,10 @@ class Sketch:
                 stroke_fill=WHITE,
             )
 
+    def text_width(self, text: str, size: float = 44, bold: bool = False) -> float:
+        """その文字を書いたときの幅(並べて置くものの位置を決めるのに使う)。"""
+        return max(self._font(size, bold).getlength(line) for line in text.splitlines()) / self._k
+
     def label(
         self,
         at: Point,
@@ -334,14 +403,93 @@ class Sketch:
         self.text(at, text, size=size, color=color, bold=bold, anchor=anchor)
 
     # -- 書き出す ---------------------------------------------------------
-    def image(self) -> Image.Image:
-        """縮めたあとの絵(書き出す大きさ)。"""
-        return self._image.resize((self.width, self.height), Image.LANCZOS)
+    def image(
+        self,
+        show: Optional[Sequence[str]] = None,
+        focus: Optional[Sequence[str]] = None,
+        faded: float = FADED,
+    ) -> Image.Image:
+        """縮めたあとの絵(書き出す大きさ)。
+
+        `show` に層の名前を並べると、その層だけを出す(省くと全部)。
+        `focus` に並べた層はそのまま、出しているほかの層は薄くする。
+        層の外で描いたものは、どちらを指定してもそのまま出る。
+        """
+        if not self._layers:
+            return self._image.resize((self.width, self.height), Image.LANCZOS)
+        known = set(self.layers())
+        for name in list(show or []) + list(focus or []):
+            if name not in known:
+                raise SketchError(
+                    f"層がありません: {name}(あるのは {' / '.join(self.layers())})"
+                )
+        canvas = self._ground.convert("RGBA")
+        for name, layer in self._layers:
+            if name and show is not None and name not in show:
+                continue
+            if name and focus is not None and name not in focus:
+                alpha = layer.getchannel("A").point(lambda value: int(value * faded))
+                layer = layer.copy()
+                layer.putalpha(alpha)
+            canvas.alpha_composite(layer)
+        return canvas.convert("RGB").resize((self.width, self.height), Image.LANCZOS)
 
     def save(self, path: str) -> str:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         self.image().save(path, optimize=True)
         return path
+
+    def save_step(
+        self,
+        path: str,
+        step: int,
+        show: Optional[Sequence[str]] = None,
+        focus: Optional[Sequence[str]] = None,
+    ) -> str:
+        """絵 `path` の `step` 段目として書き出す(`図@2.png`)。
+
+        動画は、原稿の合図〔2〕のところでこの絵に変える(`staging.py`)。
+        段は 1 から続き番号で置く(途中が抜けると、そこから先は使われない)。
+        """
+        target = step_path(path, step)
+        os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
+        self.image(show=show, focus=focus).save(target, optimize=True)
+        return target
+
+
+def clear_steps(path: str) -> None:
+    """絵 `path` の段と動きを消す(描き直す前に呼ぶ。段を減らしたときに古い段が残らない)。"""
+    stem, suffix = os.path.splitext(path)
+    for found in glob.glob(glob.escape(stem) + "@*"):
+        tail = found[len(stem) + 1 :]
+        if os.path.isdir(found) and tail.isdigit():
+            shutil.rmtree(found)
+        elif found.endswith(suffix) and tail[: -len(suffix)].isdigit():
+            os.remove(found)
+
+
+def save_motion(path: str, step: int, frames: Iterable[Image.Image]) -> List[str]:
+    """絵 `path` の `step` 段目に入るときの動きを、連番で書き出す(`図@2/000.png` …)。
+
+    動画は 1 枚を 1 コマとして流し、流し終えたら `図@2.png` で止まる。最後の 1 枚を
+    `図@2.png` と同じ絵にしておくと、止まるときに跳ねない。
+    """
+    directory = motion_dir(path, step)
+    if os.path.isdir(directory):
+        shutil.rmtree(directory)
+    os.makedirs(directory)
+    written: List[str] = []
+    for position, frame in enumerate(frames):
+        target = os.path.join(directory, f"{position:03d}.png")
+        frame.save(target, compress_level=1)
+        written.append(target)
+    return written
+
+
+def ease(t: float) -> float:
+    """ゆっくり動き出して、ゆっくり止まる(0 から 1)。動きの連番を作るときに使う。"""
+    t = min(1.0, max(0.0, t))
+    return t * t * (3.0 - 2.0 * t)
 
 
 def _rounded(x: float, y: float, w: float, h: float, radius: float) -> List[Point]:

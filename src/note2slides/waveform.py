@@ -245,6 +245,24 @@ def trim_silence(waveform: Waveform, threshold_db: float = -50.0, margin: float 
     return Waveform(waveform.samples[start:end], waveform.sample_rate)
 
 
+def leading_silence(
+    waveform: Waveform, threshold_db: float = -50.0, margin: float = 0.02
+) -> float:
+    """`trim_silence` が先頭から削る長さ(秒)。
+
+    削ったあとの音声で「何秒目に何を言うか」を数え直すのに使う
+    (合成エンジンが返す時刻は、削る前の音声のもの)。
+    """
+    if waveform.is_empty:
+        return 0.0
+    threshold = 10.0 ** (threshold_db / 20.0)
+    loud = np.flatnonzero(np.abs(waveform.samples) > threshold)
+    if len(loud) == 0:
+        return 0.0
+    pad = int(round(margin * waveform.sample_rate))
+    return max(0, int(loud[0]) - pad) / waveform.sample_rate
+
+
 def fade(waveform: Waveform, seconds: float = 0.005) -> Waveform:
     """先頭と末尾に短いフェードをかける。
 

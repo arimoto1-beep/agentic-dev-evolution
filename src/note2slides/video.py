@@ -41,7 +41,9 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from . import audio as audio_mod
 from . import captions as captions_mod
 from . import ffmpeg as ffmpeg_mod
+from . import frames as frames_mod
 from . import slide_images as images_mod
+from . import staging as staging_mod
 from . import waveform as wave_mod
 from .proc import format_command
 
@@ -89,6 +91,13 @@ class VideoOptions:
         default_factory=captions_mod.CaptionStyle
     )
     chapters: bool = True  # 概要欄に貼る章立てを書き出すか
+    #: 1 枚の中で画面を変えるとき、何秒かけて溶かすか(`staging.py`)。
+    step_fade: float = 0.3
+    #: スライドが切り替わるとき、何秒かけて溶かすか(1 枚の中で画面を変える
+    #: 動画のときだけ使う。止まった絵だけの動画は、これまでどおり切り替える)。
+    slide_fade: float = 0.2
+    #: 合図の文が読まれる何秒手前で画面を変えるか。
+    cue_lead: float = 0.2
 
     def resolved_height(self) -> int:
         if self.height:
@@ -114,6 +123,10 @@ class VideoOptions:
             raise VideoError(f"画質(crf)は 0〜51 で指定してください: {self.crf}")
         if self.min_duration < 0:
             raise VideoError("1 枚を映す最短の長さは 0 以上にしてください")
+        if min(self.step_fade, self.slide_fade, self.cue_lead) < 0:
+            raise VideoError(
+                "画面を変える長さ(step_fade / slide_fade / cue_lead)は 0 以上にしてください"
+            )
         if self.sample_rate < 8000:
             raise VideoError(f"標本化周波数が小さすぎます: {self.sample_rate}")
         if self.channels not in (1, 2):
@@ -163,13 +176,15 @@ class Segment:
     start: float
     duration: float
     narration: float  # 音声そのものの長さ(duration はこれ以上になる)
+    #: 1 枚の中の場面(何秒目にどの絵へ変えるか)。合図の無い画面では空。
+    shots: Tuple[staging_mod.Shot, ...] = ()
 
     @property
     def end(self) -> float:
         return self.start + self.duration
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "index": self.index,
             "image": os.path.basename(self.image),
             "audio": os.path.basename(self.audio) if self.audio else None,
@@ -178,6 +193,9 @@ class Segment:
             "duration": round(self.duration, 3),
             "narration": round(self.narration, 3),
         }
+        if self.shots:
+            data["shots"] = [shot.to_dict() for shot in self.shots]
+        return data
 
 
 @dataclass
@@ -450,14 +468,34 @@ def compose_video(
     result.segments = build_timeline(sources, options)
     result.duration = sum(segment.duration for segment in result.segments)
     result.warnings.extend(_check_images(result.segments, options))
+    result.segments = _with_shots(result.segments, slides_dir, audio_dir, options)
+    staged = any(segment.shots for segment in result.segments)
 
     workdir = tempfile.mkdtemp(prefix="note2slides-video-")
     try:
-        script_path = _write_filter_script(result.segments, workdir, options)
         track_path = _write_audio_track(result.segments, workdir, options, result)
-        result.command = build_command(
-            executable, result.segments, script_path, track_path, out_path, options
-        )
+        feed = None
+        if staged:
+            # 1 枚の中で画面が変わる。コマを 1 枚ずつ作って流し込む(`frames.py`)。
+            plans = frames_mod.plan_frames(
+                [
+                    (s.index, s.duration, s.shots or (staging_mod.Shot(0.0, s.image),))
+                    for s in result.segments
+                ],
+                options.fps,
+                step_fade=options.step_fade,
+                slide_fade=options.slide_fade,
+            )
+            result.command = build_piped_command(executable, track_path, out_path, options)
+
+            def feed(stream) -> None:
+                frames_mod.write_frames(stream, plans, options.size(), options.background)
+
+        else:
+            script_path = _write_filter_script(result.segments, workdir, options)
+            result.command = build_command(
+                executable, result.segments, script_path, track_path, out_path, options
+            )
         _check_command_length(result.command)
 
         total = result.duration
@@ -467,7 +505,9 @@ def compose_video(
                 on_progress(seconds, total)
 
         try:
-            encoded = ffmpeg_mod.run(result.command, timeout=timeout, on_progress=report)
+            encoded = ffmpeg_mod.run(
+                result.command, timeout=timeout, on_progress=report, feed=feed
+            )
         except ffmpeg_mod.FfmpegError:
             # 途中まで書けたファイルは消す。完成したものと見分けが付かないため。
             if os.path.exists(out_path):
@@ -499,6 +539,49 @@ def compose_video(
     _write_captions(result, options)
     result.manifest_path = _write_manifest(result, options, source_name)
     return result
+
+
+def _with_shots(
+    segments: Sequence[Segment],
+    slides_dir: Optional[str],
+    audio_dir: Optional[str],
+    options: VideoOptions,
+) -> List[Segment]:
+    """段の画像と合図の時刻がそろっているスライドに、場面の並びを付ける。
+
+    どちらかが無ければ何も付けない(止まった絵 1 枚のまま映る)。
+    """
+    staged = staging_mod.load_steps(slides_dir)
+    cues = _load_cues(audio_dir)
+    if not staged or not cues:
+        return list(segments)
+    with_shots: List[Segment] = []
+    for segment in segments:
+        shots = staging_mod.slide_shots(
+            segment.image, staged.get(segment.index), cues.get(segment.index, ()), options.cue_lead
+        )
+        changed = len(shots) > 1 or shots[0].image != segment.image
+        with_shots.append(replace(segment, shots=tuple(shots)) if changed else segment)
+    return with_shots
+
+
+def _load_cues(audio_dir: Optional[str]) -> Dict[int, List[dict]]:
+    """音声の一覧から、合図の時刻を読む(スライド番号 -> 合図の並び)。"""
+    if not audio_dir:
+        return {}
+    path = os.path.join(audio_dir, audio_mod.MANIFEST_NAME)
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    cues: Dict[int, List[dict]] = {}
+    for clip in data.get("clips", []) if isinstance(data, dict) else []:
+        if isinstance(clip, dict) and clip.get("cues"):
+            cues[int(clip["index"])] = list(clip["cues"])
+    return cues
 
 
 def _write_captions(result: VideoResult, options: VideoOptions) -> None:
@@ -635,6 +718,64 @@ def build_command(
         out_path,
     ]
     return command
+
+
+def build_piped_command(
+    executable: str, track_path: str, out_path: str, options: VideoOptions
+) -> List[str]:
+    """コマを標準入力から受け取る場合の ffmpeg のコマンド。
+
+    映像は RGB の生データを 1 コマずつ受け取る(`frames.write_frames`)。
+    書き出しの条件は、絵を渡す場合(`build_command`)と同じにそろえる。
+    """
+    width, height = options.size()
+    return [
+        executable,
+        "-hide_banner",
+        "-y",
+        "-progress",
+        "pipe:1",
+        "-nostats",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-video_size",
+        f"{width}x{height}",
+        "-framerate",
+        str(options.fps),
+        "-i",
+        "pipe:0",
+        "-i",
+        track_path,
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-r",
+        str(options.fps),
+        "-c:v",
+        VIDEO_CODEC,
+        "-preset",
+        options.preset,
+        "-crf",
+        str(options.crf),
+        "-pix_fmt",
+        "yuv420p",
+        "-g",
+        str(options.fps * 2),
+        "-c:a",
+        AUDIO_CODEC,
+        "-b:a",
+        options.audio_bitrate,
+        "-ar",
+        str(options.sample_rate),
+        "-ac",
+        str(options.channels),
+        "-movflags",
+        "+faststart",
+        out_path,
+    ]
 
 
 #: Windows がコマンド行に渡せる長さの上限(32767 文字)に対する余裕を見た値。
@@ -894,6 +1035,17 @@ def export_video(
         on_progress=(lambda index: on_slide("audio", index)) if on_slide else None,
     )
 
+    wanted = {
+        clip.index: [cue["step"] for cue in clip.cues] for clip in narration.clips if clip.cues
+    }
+    if wanted and on_stage:
+        on_stage("ナレーションの合図に合わせて、画面の段を作っています")
+    try:
+        # 合図が無いときも呼ぶ(前回の段が残っていると、作り直した資料に混ざる)。
+        staged = staging_mod.build_steps(source, slides_dir, wanted)
+    except staging_mod.StagingError as exc:
+        raise VideoError(str(exc)) from exc
+
     if on_stage:
         on_stage(f"動画を書き出しています: {out_path}")
     sources = [
@@ -922,7 +1074,7 @@ def export_video(
         source_name=os.path.basename(source),
         slides_dir=slides_dir,
         audio_dir=audio_dir,
-        warnings=images.warnings + narration.warnings,
+        warnings=images.warnings + narration.warnings + staged.warnings,
         on_progress=on_encode,
     )
 

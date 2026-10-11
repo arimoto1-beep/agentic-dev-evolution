@@ -132,3 +132,97 @@ def test_save_writes_a_png_of_the_stated_size(tmp_path):
     path = sk.save(str(tmp_path / "out" / "figure.png"))
     with Image.open(path) as image:
         assert image.size == (300, 150)
+
+
+# ---------------------------------------------------------------------------
+# 層・段・動き(同じ絵を、話に合わせて何通りにも書き出す)
+# ---------------------------------------------------------------------------
+
+BLUE = (0, 0, 200)
+
+
+def layered():
+    """層の外に赤、層 `a` に青、層 `b` に緑を、重ならない場所に描いた絵。"""
+    sk = Sketch(300, 100)
+    sk.rect(10, 10, 60, 60, fill=RED)
+    with sk.layer("a"):
+        sk.rect(110, 10, 60, 60, fill=BLUE)
+    with sk.layer("b"):
+        sk.rect(210, 10, 60, 60, fill=(0, 150, 0))
+    return sk
+
+
+def test_layers_do_not_change_the_finished_picture():
+    plain = Sketch(300, 100)
+    plain.rect(10, 10, 60, 60, fill=RED)
+    plain.rect(110, 10, 60, 60, fill=BLUE)
+    plain.rect(210, 10, 60, 60, fill=(0, 150, 0))
+    assert layered().image().tobytes() == plain.image().tobytes()
+
+
+def test_show_picks_layers_and_keeps_what_was_drawn_outside_layers():
+    image = layered().image(show=["a"])
+    assert ink(image, (15, 15, 65, 65), RED) == 50 * 50  # 層の外は、いつも出る
+    assert ink(image, (115, 15, 165, 65), BLUE) == 50 * 50
+    assert ink(image, (200, 0, 300, 100)) == 0  # 選ばなかった層は出ない
+
+
+def test_focus_fades_the_other_layers_but_does_not_remove_them():
+    image = layered().image(focus=["a"])
+    assert ink(image, (115, 15, 165, 65), BLUE) == 50 * 50
+    faded = image.getpixel((240, 40))
+    assert faded != (255, 255, 255) and faded != (0, 150, 0)
+    assert faded[0] > 150  # 地の白に寄っている
+
+
+def test_drawing_after_a_layer_is_on_top_of_it():
+    sk = Sketch(100, 100)
+    with sk.layer("under"):
+        sk.rect(10, 10, 80, 80, fill=BLUE)
+    sk.rect(30, 30, 40, 40, fill=RED)
+    assert sk.image().getpixel((50, 50)) == RED
+    assert sk.image(show=[]).getpixel((50, 50)) == RED  # 層を消しても、外で描いたものは残る
+
+
+def test_reopening_a_layer_adds_to_the_same_layer():
+    sk = Sketch(200, 100)
+    with sk.layer("a"):
+        sk.rect(10, 10, 40, 40, fill=BLUE)
+    with sk.layer("b"):
+        sk.rect(60, 10, 40, 40, fill=RED)
+    with sk.layer("a"):
+        sk.rect(110, 10, 40, 40, fill=BLUE)
+    assert sk.layers() == ["a", "b"]
+    image = sk.image(show=["a"])
+    assert ink(image, (0, 0, 200, 100), BLUE) > 2 * 30 * 30
+    assert ink(image, (0, 0, 200, 100), RED) == 0
+
+
+def test_unknown_layer_name_is_reported_with_the_known_names():
+    with pytest.raises(SketchError) as error:
+        layered().image(show=["c"])
+    assert "c" in str(error.value) and "a / b" in str(error.value)
+
+
+def test_save_step_and_motion_use_the_names_the_video_looks_for(tmp_path):
+    from note2slides import staging
+
+    sk = layered()
+    path = sk.save(str(tmp_path / "figure.png"))
+    sk.save_step(path, 1, show=["a"])
+    sk.save_step(path, 2, show=["a", "b"])
+    sketch.save_motion(path, 2, [sk.image(show=["a"]), sk.image()])
+
+    assert staging.figure_steps(path) == [str(tmp_path / "figure@1.png"), str(tmp_path / "figure@2.png")]
+    assert sorted(p.name for p in (tmp_path / "figure@2").iterdir()) == ["000.png", "001.png"]
+
+    sketch.clear_steps(path)  # 描き直す前に消す。段を減らしても、古い段が残らない
+    assert staging.figure_steps(path) == []
+    assert not (tmp_path / "figure@2").exists()
+    assert (tmp_path / "figure.png").exists()
+
+
+def test_ease_starts_and_ends_gently():
+    assert sketch.ease(0) == 0 and sketch.ease(1) == 1
+    assert sketch.ease(0.5) == pytest.approx(0.5)
+    assert sketch.ease(0.1) < 0.1 and sketch.ease(0.9) > 0.9

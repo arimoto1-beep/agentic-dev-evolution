@@ -43,8 +43,9 @@ import re
 import shutil
 import tempfile
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Sequence
 
+from . import captions as captions_mod
 from . import narration as narration_mod
 from . import pronunciation as pron_mod
 from . import tts as tts_mod
@@ -135,6 +136,9 @@ class NarrationClip:
     tail_silence: float = 0.0
     lufs: Optional[float] = None  # このファイルの音量(補正後)
     notes: List[str] = field(default_factory=list)  # 読み上げ用に整形した内容
+    #: 原稿に書かれた合図が、この音声の何秒目にあたるか(`{"step": "2", "at": 12.3}`)。
+    #: 動画はこの時刻に画面を次の段へ進める(`staging.py`)。
+    cues: List[dict] = field(default_factory=list)
 
     @property
     def filename(self) -> str:
@@ -163,6 +167,8 @@ class NarrationClip:
             data["lufs"] = round(self.lufs, 2)
         if self.notes:
             data["notes"] = self.notes
+        if self.cues:
+            data["cues"] = self.cues
         return data
 
 
@@ -372,7 +378,8 @@ def _synthesize(
         result.workdir = workdir
         raise AudioExportError(_failure_message(report, workdir, script, owner))
 
-    _assemble(script, plans, parts, outdir, options, result, on_progress)
+    offsets = {owner[job.index]: list(job.offsets) for job in jobs if job.offsets}
+    _assemble(script, plans, parts, outdir, options, result, on_progress, offsets)
 
     # 作業ディレクトリ(合成した部品と合成の指示)は、成功したときだけ消す。
     # 失敗したときは残して、同じ内容を手元で再実行できるようにする。
@@ -420,6 +427,7 @@ def _assemble(
     options: AudioOptions,
     result: NarrationResult,
     on_progress: Optional[Callable[[int], None]],
+    offsets: Optional[Dict[int, List[float]]] = None,
 ) -> None:
     """1 枚分の読み上げに前後の無音を付け、音量をそろえて書き出す。
 
@@ -429,6 +437,7 @@ def _assemble(
     """
     rate = options.sample_rate
     spoken: Dict[int, Waveform] = {}
+    trimmed: Dict[int, float] = {}  # 先頭から削った長さ(合図の時刻を数え直すのに使う)
 
     for segment in script.segments:
         plan = plans[segment.index]
@@ -440,6 +449,7 @@ def _assemble(
         # エンジンが付ける前後の余白は長さがまちまちなので、いったん削って
         # こちらで決めた長さの無音を入れ直す(この余白は、最初と最後の拍を
         # 痩せさせないために付けさせているもの。`voicevox.SYNTH_PADDING`)。
+        trimmed[segment.index] = wave_mod.leading_silence(speech)
         speech = wave_mod.fade(wave_mod.trim_silence(speech))
         spoken[segment.index] = wave_mod.concat(
             [
@@ -474,6 +484,12 @@ def _assemble(
                     tail_silence=plan.tail_silence,
                     lufs=wave_mod.loudness_lufs(audio),
                     notes=plan.notes,
+                    cues=_cue_times(
+                        plan,
+                        audio.duration,
+                        (offsets or {}).get(segment.index),
+                        trimmed.get(segment.index, 0.0),
+                    ),
                 )
             )
         else:
@@ -498,6 +514,51 @@ def _assemble(
 
     result.clips = sorted(clips, key=lambda clip: clip.index)
     result.audio_format = AudioFormat(rate, 1, wave_mod.SAMPLE_WIDTH)
+
+
+def _cue_times(
+    plan: ReadingPlan,
+    duration: float,
+    offsets: Optional[Sequence[float]],
+    trimmed: float,
+) -> List[dict]:
+    """原稿の合図が、書き出した音声の何秒目にあたるかを求める。
+
+    合成エンジンが区切りの始まりを返していれば、それをそのまま使う(削った
+    先頭の余白だけ引く)。返さないエンジンでは、字幕と同じ見積もり
+    (拍の数で按分)で決める。
+    """
+    if not any(u.cue for u in plan.utterances):
+        return []
+    if offsets and len(offsets) == len(plan.utterances):
+        starts = [plan.lead_silence + max(0.0, offset - trimmed) for offset in offsets]
+    else:
+        starts = _estimated_starts(plan, duration)
+    cues = []
+    for position, (utterance, start) in enumerate(zip(plan.utterances, starts)):
+        if not utterance.cue:
+            continue
+        cue = {"step": utterance.cue, "at": round(min(max(0.0, start), duration), 3)}
+        if position == 0:
+            cue["first"] = True  # 最初の文の合図。画面はこの状態から始まる
+        cues.append(cue)
+    return cues
+
+
+def _estimated_starts(plan: ReadingPlan, duration: float) -> List[float]:
+    pauses = sum(u.pause_after for u in plan.utterances[:-1])
+    speech = duration - plan.lead_silence - plan.tail_silence
+    spoken = speech - pauses
+    if spoken <= 0:
+        spoken, pauses = max(0.0, speech), 0.0
+    weights = [captions_mod.estimate_moras(u.text) or 1.0 for u in plan.utterances]
+    total = sum(weights) or 1.0
+    starts: List[float] = []
+    at = plan.lead_silence
+    for utterance, weight in zip(plan.utterances, weights):
+        starts.append(at)
+        at += spoken * weight / total + (utterance.pause_after if pauses else 0.0)
+    return starts
 
 
 def _adjust_loudness(

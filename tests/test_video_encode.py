@@ -220,3 +220,111 @@ def test_failure_leaves_the_work_directory(tmp_path, monkeypatch):
     # 何を指示したかを後から読めるように、作業ファイルを残す。
     assert os.path.isfile(os.path.join(kept["workdir"], "filters.txt"))
     assert os.path.isfile(os.path.join(kept["workdir"], "narration.wav"))
+
+
+# ---------------------------------------------------------------------------
+# 1 枚の中で画面が変わる動画(段の画像と合図の時刻があるとき)
+# ---------------------------------------------------------------------------
+
+
+def stage_materials(tmp_path, cues_by_slide, durations):
+    """スライド画像・音声に加えて、段の画像と合図の時刻を置く。
+
+    段の画像は、スライドごとに「次の色」1 枚(合図 `1`)。
+    """
+    from note2slides import staging
+
+    slides_dir, audio_dir = tmp_path / "slides", tmp_path / "audio"
+    slides_dir.mkdir()
+    audio_dir.mkdir()
+    sources = make_sources(slides_dir, durations)
+    for source in sources:  # 音声は音声の場所へ
+        target = str(audio_dir / os.path.basename(source.audio))
+        os.replace(source.audio, target)
+    sources = [
+        SlideSource(s.index, s.image, str(audio_dir / os.path.basename(s.audio))) for s in sources
+    ]
+    steps_dir = slides_dir / staging.STEPS_DIR
+    steps_dir.mkdir()
+    staged = []
+    for index in cues_by_slide:
+        name = f"slide_{index:03d}.step01.png"
+        Image.new("RGB", (320, 180), COLORS[index % len(COLORS)]).save(str(steps_dir / name))
+        staged.append({"index": index, "count": 1, "images": {"1": name}, "motions": {}})
+    with open(steps_dir / staging.MANIFEST_NAME, "w", encoding="utf-8") as f:
+        json.dump({"slides": staged}, f)
+    clips = [
+        {"index": s.index, "file": os.path.basename(s.audio), "cues": cues_by_slide.get(s.index, [])}
+        for s in sources
+    ]
+    with open(audio_dir / "narration.json", "w", encoding="utf-8") as f:
+        json.dump({"clips": clips}, f)
+    return sources, str(slides_dir), str(audio_dir)
+
+
+@requires_ffmpeg
+def test_screen_changes_inside_a_slide_at_the_time_of_the_cue(tmp_path):
+    """合図の時刻で画面が変わり、動画の長さは音声の長さのまま変わらない。"""
+    sources, slides_dir, audio_dir = stage_materials(
+        tmp_path, {1: [{"step": "1", "at": 1.0}]}, [2.0, 1.0]
+    )
+    out = str(tmp_path / "out.mp4")
+    options = VideoOptions(step_fade=0.0, slide_fade=0.0, cue_lead=0.0, captions="none", **FAST)
+
+    result = compose_video(sources, out, options, slides_dir=slides_dir, audio_dir=audio_dir)
+
+    frames = decoded_frames(out, str(tmp_path / "frames"))
+    assert len(frames) == 30  # 2.0 秒 + 1.0 秒。段を入れても長さは変わらない
+    assert set(frames[:10]) == {1}  # 合図までは、スライドそのもの
+    assert set(frames[10:20]) == {2}  # 合図から、段の画像(次の色)
+    assert set(frames[20:]) == {2}  # 2 枚目のスライド
+    assert [shot.cue for shot in result.segments[0].shots] == ["全体", "1"]
+    with open(result.manifest_path, encoding="utf-8") as f:
+        listed = json.load(f)["slides"][0]["shots"]
+    assert [shot["at"] for shot in listed] == [0.0, 1.0]
+
+
+@requires_ffmpeg
+def test_staged_video_keeps_the_audio_in_step(tmp_path):
+    sources, slides_dir, audio_dir = stage_materials(
+        tmp_path, {1: [{"step": "1", "at": 0.5}]}, [1.0, 0.7]
+    )
+    out = str(tmp_path / "out.mp4")
+
+    result = compose_video(
+        sources, out, VideoOptions(captions="none", **FAST), slides_dir=slides_dir, audio_dir=audio_dir
+    )
+
+    audio = decoded_audio(out, str(tmp_path / "out.wav"))
+    assert audio.duration >= result.duration - 0.01
+    assert result.warnings == []  # 長さの食い違いの警告が出ていない
+
+
+@requires_ffmpeg
+def test_without_cues_the_video_is_composed_as_before(tmp_path):
+    """段の画像だけあって合図が無ければ、止まった絵の経路のまま(コマを流さない)。"""
+    sources, slides_dir, audio_dir = stage_materials(tmp_path, {}, [0.5])
+    out = str(tmp_path / "out.mp4")
+
+    result = compose_video(
+        sources, out, VideoOptions(captions="none", **FAST), slides_dir=slides_dir, audio_dir=audio_dir
+    )
+
+    assert "pipe:0" not in result.command
+    assert not result.segments[0].shots
+
+
+@requires_ffmpeg
+def test_missing_step_picture_fails_and_leaves_no_video(tmp_path):
+    sources, slides_dir, audio_dir = stage_materials(
+        tmp_path, {1: [{"step": "1", "at": 0.5}]}, [1.0]
+    )
+    os.remove(os.path.join(slides_dir, "steps", "slide_001.step01.png"))
+    out = str(tmp_path / "out.mp4")
+
+    with pytest.raises(ffmpeg_mod.FfmpegError) as error:
+        compose_video(
+            sources, out, VideoOptions(captions="none", **FAST), slides_dir=slides_dir, audio_dir=audio_dir
+        )
+    assert "slide_001.step01.png" in str(error.value)
+    assert not os.path.exists(out)  # 途中までの動画を、成功として残さない

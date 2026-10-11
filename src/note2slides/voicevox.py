@@ -591,8 +591,12 @@ class VoicevoxEngine:
         intonation: float,
         timeout: float,
     ) -> None:
+        phrases, counts = self._read_continuously(job.pieces, style.id, speed, timeout)
+        # 区切りが何秒目から始まるかは、合成の前に決まっている(拍の長さの合計)。
+        # 音を聞き直さずに、画面を変える時刻として使える。
+        job.offsets = piece_offsets(phrases, counts, speed, SYNTH_PADDING)
         query = {
-            "accent_phrases": self._read_continuously(job.pieces, style.id, speed, timeout),
+            "accent_phrases": phrases,
             "speedScale": float(speed),
             "pitchScale": float(pitch),
             "intonationScale": float(intonation),
@@ -620,7 +624,7 @@ class VoicevoxEngine:
 
     def _read_continuously(
         self, pieces: Sequence[SpeechPiece], style_id: int, speed: float, timeout: float
-    ) -> List[dict]:
+    ) -> Tuple[List[dict], List[int]]:
         """1 枚分の区切りを、ひと続きに読み上げるアクセント句の並びにする。
 
         区切りごとに読みを作ってからつなぎ、音程は 1 枚分まとめて決める。
@@ -635,8 +639,9 @@ class VoicevoxEngine:
             )
 
         combined = self._mora_data(combined, style_id, timeout)
-        _place_pauses(combined, [len(group) for group in groups], [p.pause_after for p in pieces], speed)
-        return combined
+        counts = [len(group) for group in groups]
+        _place_pauses(combined, counts, [p.pause_after for p in pieces], speed)
+        return combined, counts
 
     def _accent_phrases(self, text: str, style_id: int, timeout: float) -> List[dict]:
         query = urllib.parse.urlencode({"text": text, "speaker": style_id})
@@ -693,6 +698,35 @@ def _place_pauses(
             pending = 0.0
         # 読みが 1 つも作られなかった区切り(記号だけなど)の間は、次に持ち越す。
         pending += max(0.0, pause)
+
+
+def piece_offsets(
+    phrases: Sequence[dict], counts: Sequence[int], speed: float, padding: float = 0.0
+) -> List[float]:
+    """各区切りが、合成した音声の何秒目から始まるかを返す。
+
+    VOICEVOX は拍(子音 + 母音)と間の長さを足したとおりに音を作るので、
+    区切りより前にある長さを足せば、その区切りの始まりになる。長さはすべて
+    speedScale で割られる。`padding` は音声の先頭に付く余白(秒。こちらは
+    速さを掛けて渡してあるので、割ったあとの値をそのまま足す)。
+
+    読みが 1 つも作られなかった区切り(記号だけ)は、次の区切りと同じ時刻になる。
+    """
+    rate = speed if speed > 0 else 1.0
+    offsets: List[float] = []
+    at = 0.0
+    position = 0
+    for count in counts:
+        offsets.append(padding + at / rate)
+        for phrase in phrases[position : position + count]:
+            for mora in phrase.get("moras") or []:
+                at += float(mora.get("consonant_length") or 0.0)
+                at += float(mora.get("vowel_length") or 0.0)
+            pause = phrase.get("pause_mora")
+            if pause:
+                at += float(pause.get("vowel_length") or 0.0)
+        position += count
+    return offsets
 
 
 def _pause_mora(seconds: float) -> dict:

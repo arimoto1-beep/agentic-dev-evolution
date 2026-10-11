@@ -41,13 +41,19 @@
 「いち……まい」と間を空けて読んでしまうため。空白は表記上のものなので、
 詰めても意味は変わらない(画面には元の表記がそのまま出る)。英数字どうしの
 空白は語の区切りなので残す(`note2slides article.md` は 2 語のまま読む)。
+
+原稿には **合図** を書ける(`〔2〕` `〔全体〕` `〔間 1.5〕`)。合図は読み上げない。
+「この文から画面を次の段へ進める」「ここで一拍置く」を、文の並びの中に書くための
+印で、何秒目かは書かない(合成するまで分からないため)。合図のところで読み上げの
+単位を区切り、どの単位の前にあったかを `Utterance.cue` に残す。何秒目になったかは
+合成のあとで分かる(`audio.py`)。画面をどう変えるかは `staging.py` が決める。
 """
 
 from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Mapping, Optional
 
 #: 文の終わりとみなす記号(NFKC 正規化のあとなので半角と全角の両方を見る)。
@@ -66,6 +72,16 @@ _BRACKET_PAIRS = {
 }
 _OPENING_BRACKETS = "".join(_BRACKET_PAIRS)
 _CLOSE_TO_OPEN = {close: open_ for open_, close in _BRACKET_PAIRS.items()}
+
+#: 合図(読み上げない印)。中身が下の 3 種類のどれかのときだけ合図として扱い、
+#: それ以外の〔…〕は、これまでどおり本文の括弧として読み上げる。
+#:
+#:     〔2〕        画面を 2 段目へ進める(1 から数える)
+#:     〔全体〕     画面をすべて出した状態にする
+#:     〔間 1.5〕   ここで 1.5 秒の間を足す
+CUE_ALL = "全体"
+_CUE = re.compile(r"〔\s*(\d{1,3}|全体|間\s*\d+(?:\.\d+)?)\s*〕")
+_CUE_PAUSE = re.compile(r"^間\s*(\d+(?:\.\d+)?)$")
 
 _URL = re.compile(r"https?://\S+|www\.[^\s、。]+")
 # 行頭の箇条書き記号。文中の「・」は区切り文字(「A・B」)なので、行頭だけを見る。
@@ -164,6 +180,8 @@ class Utterance:
     text: str
     pause_after: float
     spoken: str = ""
+    #: この区切りの直前に書かれていた合図(`2` や `全体`)。無ければ空。
+    cue: str = ""
 
     @property
     def to_speak(self) -> str:
@@ -201,6 +219,7 @@ class ReadingPlan:
             "utterances": [
                 {"text": u.text, "pause_after": round(u.pause_after, 3)}
                 | ({"spoken": u.spoken} if u.spoken else {})
+                | ({"cue": u.cue} if u.cue else {})
                 for u in self.utterances
             ],
             "notes": self.notes,
@@ -233,22 +252,101 @@ def plan_reading(
         return plan
 
     plan.tail_silence = style.tail_silence + max(0.0, hold)
+    pending_cue = ""  # 次の区切りに付ける合図
     for line_number, line in enumerate(lines):
-        pieces = _split_line(line, style)
         last_line = line_number == len(lines) - 1
-        for piece_number, (piece, at_sentence_end) in enumerate(pieces):
-            last_piece = piece_number == len(pieces) - 1
-            if last_piece and last_line:
-                pause = 0.0  # 読み終わったあとの無音は tail_silence が持つ
-            elif last_piece:
-                pause = style.line_pause
-            elif at_sentence_end:
-                pause = style.sentence_pause
-            else:
-                pause = style.clause_pause
-            spoken = _apply_dictionary(piece, style, plan.notes)
-            plan.utterances.append(Utterance(piece, pause, spoken if spoken != piece else ""))
+        parts = _split_cues(line)
+        spoken_parts = [i for i, (kind, value) in enumerate(parts) if kind == _TEXT]
+        for part_number, (kind, value) in enumerate(parts):
+            if kind == _STEP:
+                pending_cue = value
+                continue
+            if kind == _PAUSE:
+                # 間は直前の区切りの後ろに足す。まだ何も読んでいなければ、
+                # 話し始めるまでの無音を延ばす。
+                if plan.utterances:
+                    previous = plan.utterances[-1]
+                    plan.utterances[-1] = replace(
+                        previous, pause_after=previous.pause_after + float(value)
+                    )
+                else:
+                    plan.lead_silence += float(value)
+                continue
+            last_part = part_number == spoken_parts[-1]
+            pieces = _split_line(value, style)
+            for piece_number, (piece, at_sentence_end) in enumerate(pieces):
+                last_piece = piece_number == len(pieces) - 1
+                if last_piece and not last_part and not _ends_sentence(value):
+                    # 文の途中に合図がある。句点を補わず、間も置かずに続けて読む。
+                    piece, pause = value_tail(piece, value), 0.0
+                elif last_piece and last_part and last_line:
+                    pause = 0.0  # 読み終わったあとの無音は tail_silence が持つ
+                elif last_piece and last_part:
+                    pause = style.line_pause
+                elif at_sentence_end:
+                    pause = style.sentence_pause
+                else:
+                    pause = style.clause_pause
+                spoken = _apply_dictionary(piece, style, plan.notes)
+                plan.utterances.append(
+                    Utterance(piece, pause, spoken if spoken != piece else "", cue=pending_cue)
+                )
+                pending_cue = ""
+    if plan.utterances and plan.utterances[-1].pause_after:
+        # 最後の区切りのあとに間の合図があった。読み終わったあとの無音に移す
+        # (最後の区切りの `pause_after` は 0 という約束を保つ)。
+        last = plan.utterances[-1]
+        plan.tail_silence += last.pause_after
+        plan.utterances[-1] = replace(last, pause_after=0.0)
     return plan
+
+
+_TEXT, _STEP, _PAUSE = "text", "step", "pause"
+
+
+def _split_cues(line: str) -> List[tuple[str, str]]:
+    """1 行を、読み上げる文字と合図に分ける(書かれた順のまま)。"""
+    parts: List[tuple[str, str]] = []
+    position = 0
+    for matched in _CUE.finditer(line):
+        before = line[position : matched.start()].strip()
+        if before:
+            parts.append((_TEXT, before))
+        value = matched.group(1).strip()
+        pause = _CUE_PAUSE.match(value)
+        if pause:
+            parts.append((_PAUSE, pause.group(1)))
+        else:
+            parts.append((_STEP, value))
+        position = matched.end()
+    rest = line[position:].strip()
+    if rest:
+        parts.append((_TEXT, rest))
+    return parts
+
+
+def _ends_sentence(text: str) -> bool:
+    stripped = text.rstrip()
+    return bool(stripped) and stripped[-1] in SENTENCE_ENDINGS + CLOSING_BRACKETS
+
+
+def value_tail(piece: str, value: str) -> str:
+    """補われた句点を外す(文の途中で区切っただけなので、文は終わっていない)。"""
+    stripped = value.rstrip()
+    if piece.endswith("。") and not stripped.endswith("。"):
+        return piece[:-1]
+    return piece
+
+
+def strip_cues(text: str) -> str:
+    """合図を取り除いた原稿(字幕や一覧に、印を出さないために使う)。"""
+    return _CUE.sub("", text)
+
+
+def cue_names(text: str) -> List[str]:
+    """原稿に書かれている、画面を進める合図(`2` や `全体`)。書かれた順。"""
+    normalized = unicodedata.normalize("NFKC", text or "")
+    return [value for kind, value in _split_cues(normalized) if kind == _STEP]
 
 
 def _apply_dictionary(text: str, style: ReadingStyle, notes: List[str]) -> str:

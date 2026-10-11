@@ -132,6 +132,10 @@ class SpeechJob:
     pieces: List[SpeechPiece]
     out_path: str
     slide: int = 0
+    #: 各区切りが、書き出した WAV の何秒目から始まるか(エンジンが合成のあとに
+    #: 埋める)。分からないエンジンでは空のままで、使う側が見積もる(`audio.py`)。
+    #: 画面をナレーションに合わせて変えるのに使う。
+    offsets: List[float] = field(default_factory=list)
 
     @property
     def text(self) -> str:

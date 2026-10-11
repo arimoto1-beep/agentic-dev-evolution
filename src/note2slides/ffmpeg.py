@@ -166,12 +166,36 @@ def describe(path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+class _PipeClosed(Exception):
+    """ffmpeg が入力を読むのをやめた(先に終了した)。"""
+
+
+class _Pipe:
+    """ffmpeg の標準入力。書けなくなったことを、ほかの失敗と区別して伝える。"""
+
+    def __init__(self, stream) -> None:
+        self._stream = stream
+
+    def write(self, data: bytes) -> int:
+        try:
+            return self._stream.write(data)
+        except (BrokenPipeError, OSError, ValueError) as exc:
+            raise _PipeClosed() from exc
+
+
 def run(
     command: Sequence[str],
     timeout: float = 1800,
     on_progress: Optional[Callable[[float], None]] = None,
+    feed: Optional[Callable[[object], None]] = None,
 ) -> RunReport:
     """ffmpeg を実行し、進捗を読みながら終わるのを待つ。
+
+    `feed` を渡すと、標準入力をパイプにして、その関数に書き込み口を渡す
+    (コマを 1 枚ずつ流し込む場合)。関数が戻ったら入力を閉じる。途中で
+    ffmpeg が止まった場合の **書き込みの** 失敗は握りつぶし、理由は ffmpeg の
+    終了コードと標準エラー出力から伝える。コマを作る側の失敗(絵が無い、など)は
+    握りつぶさない。握りつぶすと、途中までの動画が成功として残る。
 
     `-progress pipe:1` を付けて呼ぶ前提で、標準出力に流れる進捗を読み取り、
     `on_progress` に「いま何秒目まで書き出したか」を渡す。長い動画では数分
@@ -184,7 +208,7 @@ def run(
     try:
         process = subprocess.Popen(
             command,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if feed else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -194,6 +218,26 @@ def run(
     captured: List[bytes] = []
     drain = threading.Thread(target=lambda: captured.append(process.stderr.read()), daemon=True)
     drain.start()
+
+    feed_errors: List[BaseException] = []
+
+    def pump() -> None:
+        try:
+            feed(_Pipe(process.stdin))
+        except _PipeClosed:
+            pass  # ffmpeg が先に終わった。理由は終了コードの側で伝える
+        except BaseException as exc:  # コマを作る側の失敗は、呼び出し元へ返す
+            feed_errors.append(exc)
+            process.kill()
+        finally:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+
+    feeder = threading.Thread(target=pump, daemon=True) if feed else None
+    if feeder:
+        feeder.start()
 
     timed_out = threading.Event()
 
@@ -221,10 +265,19 @@ def run(
                     report.frames = int(matched.group(1))
             report.returncode = process.wait()
             drain.join(timeout=10)
+            if feeder:
+                feeder.join(timeout=10)
     finally:
         watchdog.cancel()
 
     report.stderr = _decode(captured[0] if captured else b"")
+    if feed_errors:
+        raise FfmpegRunError(
+            f"動画のコマを作れませんでした: {type(feed_errors[0]).__name__}: {feed_errors[0]}",
+            command,
+            returncode=report.returncode,
+            stderr=report.stderr,
+        ) from feed_errors[0]
     if timed_out.is_set():
         raise FfmpegRunError(
             f"ffmpeg が {timeout:g} 秒以内に終了しませんでした。"
