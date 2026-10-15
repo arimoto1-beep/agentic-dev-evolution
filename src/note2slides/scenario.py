@@ -42,6 +42,7 @@ from .model import (
     KIND_CODE,
     KIND_CONTENT,
     KIND_DIAGRAM,
+    KIND_FULL,
     KIND_IMAGE,
     KIND_SECTION,
     KIND_TABLE,
@@ -80,8 +81,12 @@ SCENARIO_TYPE = "scenario"
 LAYOUT_BODY = "本文"
 LAYOUT_SECTION = "章扉"
 LAYOUT_TITLE = "表紙"
+LAYOUT_FULL = "全画面"
 
 _LAYOUTS = {
+    "全画面": LAYOUT_FULL,
+    "full": LAYOUT_FULL,
+    "fullscreen": LAYOUT_FULL,
     "本文": LAYOUT_BODY,
     "body": LAYOUT_BODY,
     "章扉": LAYOUT_SECTION,
@@ -392,7 +397,11 @@ class _Reader:
             raise ScenarioError(
                 f"{self._at(slide.line)}: {slide.layout}には札を置けません: {slide.label}\n"
                 f"  札は、見出しの行の右端に置くものです({LAYOUT_BODY}の画面だけに書けます)。\n"
-                f"  {slide.layout}でも同じことを言う場合は、見出しの文に書いてください。"
+                + (
+                    "  全画面の画面は絵が画面全体を持つので、札も絵の中に描いてください。"
+                    if slide.layout == LAYOUT_FULL
+                    else f"  {slide.layout}でも同じことを言う場合は、見出しの文に書いてください。"
+                )
             )
 
     def _layout(self, number: int, value: str) -> str:
@@ -400,7 +409,8 @@ class _Reader:
         if layout is None:
             raise ScenarioError(
                 f"{self._at(number)}: 知らないレイアウトです: {value}\n"
-                "  指定できるのは " + " / ".join(sorted({LAYOUT_BODY, LAYOUT_SECTION, LAYOUT_TITLE}))
+                "  指定できるのは "
+                + " / ".join(sorted({LAYOUT_BODY, LAYOUT_SECTION, LAYOUT_TITLE, LAYOUT_FULL}))
                 + " です(既定は " + LAYOUT_BODY + ")。"
             )
         return layout
@@ -498,6 +508,22 @@ def _build_slide(
                 f" `レイアウト: {LAYOUT_BODY}` にしてください。"
             )
         return Slide(kind=KIND_SECTION, title=source.title, notes=notes)
+    if source.layout == LAYOUT_FULL:
+        if len(blocks) != 1 or not isinstance(blocks[0], Image):
+            raise ScenarioError(
+                f"{_where(scenario, source)}: 全画面の画面に置けるのは、絵 1 枚だけです。\n"
+                "  見出しも資料名も置かず、絵を画面いっぱいに映すレイアウトです。"
+                "`### 画面` には `![](図.png)` を 1 つだけ書いてください。\n"
+                f"  文章や表も出す場合は `レイアウト: {LAYOUT_BODY}` にするか、絵の中に描いてください。"
+            )
+        part = _image_part(scenario, source, blocks[0])
+        return Slide(
+            kind=KIND_FULL,
+            title=source.title,
+            image_path=part.image_path,
+            image_alt=part.image_alt,
+            notes=notes,
+        )
 
     parts = _screen_parts(scenario, source, blocks, warnings)
     _warn_if_crowded(scenario, source, parts, style, warnings)

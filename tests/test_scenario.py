@@ -143,10 +143,11 @@ class TestLayout:
 
     def test_an_unknown_layout_lists_the_ones_that_exist(self):
         with pytest.raises(ScenarioError) as error:
-            deck_of("## 見出し\n\n### 設定\n- レイアウト: 全画面\n")
+            deck_of("## 見出し\n\n### 設定\n- レイアウト: 二段組\n")
 
-        assert "全画面" in str(error.value)
+        assert "二段組" in str(error.value)
         assert "章扉" in str(error.value)
+        assert "全画面" in str(error.value)
 
     def test_english_names_can_be_used(self):
         deck = deck_of("## Title\n\n### settings\n- layout: cover\n\n### screen\nsub\n\n### narration\nHello.\n")

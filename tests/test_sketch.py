@@ -8,6 +8,8 @@
 * 日本語の文字が出ること(豆腐になっても、絵としては描けてしまう)
 """
 
+import os
+
 import pytest
 from PIL import Image
 
@@ -226,3 +228,112 @@ def test_ease_starts_and_ends_gently():
     assert sketch.ease(0) == 0 and sketch.ease(1) == 1
     assert sketch.ease(0.5) == pytest.approx(0.5)
     assert sketch.ease(0.1) < 0.1 and sketch.ease(0.9) > 0.9
+
+
+# ---------------------------------------------------------------------------
+# 段の並びと、段のあいだの動き(gen37)
+# ---------------------------------------------------------------------------
+
+
+def test_video_canvas_is_the_size_of_a_video_frame():
+    assert sketch.VIDEO_SIZE == (1920, 1080)
+    assert Sketch(*sketch.VIDEO_SIZE).image().size == (1920, 1080)
+
+
+def test_levels_say_how_strongly_each_layer_is_drawn():
+    sk = layered()
+    assert sk.levels() == {"a": 1.0, "b": 1.0}
+    assert sk.levels(show=["a"]) == {"a": 1.0, "b": 0.0}
+    assert sk.levels(focus=["a"], faded=0.3) == {"a": 1.0, "b": 0.3}
+
+
+def test_transition_ends_exactly_on_the_next_step():
+    sk = layered()
+    frames = sk.transition(dict(show=["a"]), dict(show=["a", "b"]), seconds=0.2, fps=30)
+    assert len(frames) == 6
+    assert frames[-1].tobytes() == sk.image(show=["a", "b"]).tobytes()  # 止まるときに跳ねない
+
+
+def test_a_new_layer_rises_into_place_while_it_appears():
+    sk = layered()
+    frames = sk.transition(dict(show=["a"]), dict(show=["a", "b"]), seconds=0.4, rise=20, fps=30)
+    early = frames[1]
+    # まだ薄く、少し下にある(本来の場所の下の縁より下に、色が出ている)。
+    assert ink(early, (210, 72, 270, 92)) > 0
+    assert early.getpixel((240, 50)) != (0, 150, 0)
+    # ほかの層と、層の外に描いたものは動かない。
+    assert ink(early, (115, 15, 165, 65), BLUE) == 50 * 50
+    assert ink(early, (15, 15, 65, 65), RED) == 50 * 50
+
+
+def test_a_layer_that_only_changes_strength_stays_where_it_is():
+    sk = layered()
+    frames = sk.transition(dict(focus=["a"]), dict(focus=["b"]), seconds=0.2, rise=20, fps=30)
+    for frame in frames:
+        assert ink(frame, (100, 72, 180, 100)) == 0  # 下へずれていない
+        assert ink(frame, (200, 72, 280, 100)) == 0
+
+
+def test_save_steps_writes_the_pictures_and_the_motions_the_video_looks_for(tmp_path):
+    from note2slides import staging
+
+    sk = layered()
+    path = str(tmp_path / "scene.png")
+    sk.save_steps(path, [dict(show=["a"]), dict(show=["a", "b"])], opening=dict(show=[]), seconds=0.2)
+
+    assert staging.figure_steps(path) == [str(tmp_path / "scene@1.png"), str(tmp_path / "scene@2.png")]
+    with Image.open(staging.step_path(path, 0)) as opening:
+        assert ink(opening, (100, 0, 300, 100)) == 0  # 層は 1 つも出ていない
+    for step in (1, 2):  # 1 段目にも、最初の姿からの動きが付く
+        assert len(os.listdir(staging.motion_dir(path, step))) == 6
+    with Image.open(path) as final, Image.open(staging.step_path(path, 2)) as last:
+        assert final.tobytes() == last.tobytes()  # 資料に載るのは、最後の段の姿
+
+
+def test_save_steps_without_an_opening_gives_the_first_step_no_motion(tmp_path):
+    from note2slides import staging
+
+    sk = layered()
+    path = str(tmp_path / "scene.png")
+    sk.save_steps(path, [dict(show=["a"]), dict(show=["a", "b"], seconds=0)], seconds=0.2)
+    assert not os.path.exists(staging.step_path(path, 0))
+    assert not os.path.isdir(staging.motion_dir(path, 1))
+    assert not os.path.isdir(staging.motion_dir(path, 2))  # seconds=0 は動きを付けない
+
+
+def test_save_steps_accepts_pictures_and_motions_prepared_by_the_caller(tmp_path):
+    from note2slides import staging
+
+    sk = layered()
+    path = str(tmp_path / "scene.png")
+    other = Image.new("RGB", (300, 100), (1, 2, 3))
+    sk.save_steps(path, [dict(show=["a"]), dict(image=other, motion=[other, other, other]), dict(show=["a", "b"])])
+    with Image.open(staging.step_path(path, 2)) as image:
+        assert image.getpixel((5, 5)) == (1, 2, 3)
+    assert len(os.listdir(staging.motion_dir(path, 2))) == 3
+    # 自分で用意した絵からは、層の動きを作れない(動画の側が溶かす)。
+    assert not os.path.isdir(staging.motion_dir(path, 3))
+
+
+def test_save_steps_removes_steps_left_from_a_previous_run(tmp_path):
+    from note2slides import staging
+
+    sk = layered()
+    path = str(tmp_path / "scene.png")
+    sk.save_steps(path, [dict(show=["a"]), dict(show=["a", "b"]), dict()], opening=dict(show=[]))
+    sk.save_steps(path, [dict(show=["a"])])
+    assert staging.figure_steps(path) == [str(tmp_path / "scene@1.png")]
+    assert not os.path.exists(staging.step_path(path, 0))
+
+
+@requires_font
+def test_halo_can_take_the_colour_of_the_ground():
+    dark = (20, 30, 50)
+    sk = Sketch(200, 80, background=dark)
+    sk.text((100, 40), "字", size=40, color=(255, 255, 255), halo=dark)
+    colours = {pixel for _, pixel in sk.image().getcolors(200 * 80)}
+    # 縁取りが地の色なので、白い字と地のあいだに別の色の輪ができない。
+    assert all(min(c) >= 20 for c in colours)
+    plain = Sketch(200, 80, background=dark)
+    plain.text((100, 40), "字", size=40, color=(255, 0, 0), halo=True)
+    assert (255, 255, 255) in {pixel for _, pixel in plain.image().getcolors(200 * 80)}

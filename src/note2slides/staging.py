@@ -13,6 +13,7 @@
     図解(流れ・枠・階段)  項目 1 つが 1 段(前の矢印や蹴込みは、その項目に付く)
     文章          段落 1 つが 1 段
     絵            1 段。ただし `図@1.png` `図@2.png` … が隣にあれば、その枚数ぶんの段
+                  (`図@0.png` があれば、最初の合図までの姿として使う)
     それ以外の図解  図解 1 つが 1 段
 
 n 段目の画面は、「n 段目までを出し、n 段目だけを濃く、それより前は少し引く」。
@@ -94,6 +95,10 @@ class Element:
     frame: Optional[Box] = None
     frames: List[str] = field(default_factory=list)  # 絵の段(`図@n.png`)
     final: str = ""  # 絵の最後の姿(`図.png`)
+    #: 絵の、まだ何も出していない姿(`図@0.png`)。無ければ、絵のある場所を地の色で
+    #: 覆う。画面いっぱいの絵は覆うと白紙になるので、地や見出しだけを描いた姿を
+    #: 絵の側で用意する。
+    opening: str = ""
     motions: Dict[int, List[str]] = field(default_factory=dict)  # 段 -> 動きの連番
 
     @property
@@ -108,17 +113,27 @@ class StagedSlide:
     images: Dict[str, str] = field(default_factory=dict)  # 合図 -> 画像
     motions: Dict[str, List[str]] = field(default_factory=dict)  # 合図 -> 動きの連番
 
-    def to_dict(self) -> dict:
+    def to_dict(self, outdir: str = "") -> dict:
         return {
             "index": self.index,
             "count": self.count,
-            "images": {key: os.path.basename(path) for key, path in self.images.items()},
+            "images": {key: _listed(path, outdir) for key, path in self.images.items()},
             "motions": {
-                key: [os.path.relpath(path, os.path.dirname(os.path.dirname(path))).replace(os.sep, "/")
-                      for path in paths]
+                key: [_listed(path, outdir) for path in paths]
                 for key, paths in self.motions.items()
             },
         }
+
+
+def _listed(path: str, outdir: str) -> str:
+    """一覧に書く場所。段の置き場の中なら相対で、外(絵そのもの)なら絶対で書く。"""
+    path = os.path.abspath(path)
+    base = os.path.abspath(outdir or os.path.dirname(path))
+    try:
+        relative = os.path.relpath(path, base)
+    except ValueError:  # ドライブが違う
+        return path
+    return path if relative.startswith("..") else relative.replace(os.sep, "/")
 
 
 @dataclass
@@ -196,6 +211,7 @@ def _stage_slide(
     total = sum(element.count for element in elements)
     staged = StagedSlide(index=number, count=total)
     has_figure_steps = any(element.frames for element in elements)
+    whole = _whole_frame(base, elements)
     wanted = list(dict.fromkeys(cues))  # 書かれた順のまま、重複を除く
     if any(cue != CUE_ALL for cue in wanted) and CUE_START not in wanted:
         wanted.insert(0, CUE_START)  # 最初の合図までの画面(何も出していない状態)
@@ -203,6 +219,9 @@ def _stage_slide(
         if cue == CUE_ALL:
             if not has_figure_steps:
                 continue  # スライド画像そのものが「全体」
+            if whole is not None:
+                staged.images[cue] = whole.final
+                continue
             image = render_step(base, elements, None)
             path = os.path.join(outdir, f"slide_{number:03d}.all.png")
         else:
@@ -214,6 +233,13 @@ def _stage_slide(
                     "  段は画面に置かれた順に数えます(表は 1 行、図解は 1 項目、"
                     "文章は 1 段落、絵は `図@1.png` … の枚数)。"
                 )
+            if whole is not None and (step > 0 or whole.opening):
+                # 画面いっぱいの絵。段の絵も動きの連番も、そのまま動画のコマになる
+                # (スライド画像の上へ置き直すと、同じ絵をもう一度書き出すだけになる)。
+                staged.images[cue] = whole.frames[step - 1] if step else whole.opening
+                if step and whole.motions.get(step):
+                    staged.motions[cue] = list(whole.motions[step])
+                continue
             image = render_step(base, elements, step)
             path = os.path.join(outdir, f"slide_{number:03d}.step{step:02d}.png")
             motion = _motion_of(elements, step)
@@ -243,7 +269,9 @@ def _render(
     first = 1
     for element in elements:
         last = first + element.count - 1
-        if step is not None and step < first:
+        if step is not None and step < first and element.opening:
+            pastes.append((element.opening, element.box))
+        elif step is not None and step < first:
             if element.frame:
                 # 外枠は線が太く、角が丸い。縁のにじみまで覆うよう、広めに取る。
                 _veil(pixels, element.frame, HIDDEN, pad=_PAD * 3)
@@ -266,6 +294,30 @@ def _render(
             size = (box[2] - box[0], box[3] - box[1])
             canvas.paste(picture.convert("RGB").resize(size, Image.LANCZOS), box[:2])
     return canvas
+
+
+def _whole_frame(base: Image.Image, elements: Sequence[Element]) -> Optional[Element]:
+    """画面いっぱいに置かれた、段のある絵(それ 1 つだけの画面)。無ければ None。
+
+    段の絵がどれも動画のコマと同じ大きさのときだけ返す(大きさが違う絵は、
+    これまでどおりスライド画像の上へ置き直す)。
+    """
+    if len(elements) != 1 or not elements[0].frames:
+        return None
+    element = elements[0]
+    left, top, right, bottom = element.box
+    if max(abs(left), abs(top), abs(right - base.width), abs(bottom - base.height)) > 2:
+        return None
+    paths = [element.final, *element.frames] + ([element.opening] if element.opening else [])
+    paths += [motion[0] for motion in element.motions.values() if motion]
+    for path in paths:
+        try:
+            with Image.open(path) as opened:
+                if opened.size != base.size:
+                    return None
+        except OSError:
+            return None
+    return element
 
 
 def _motion_of(elements: Sequence[Element], step: int) -> List[str]:
@@ -617,6 +669,8 @@ def _figure_element(shape, scale: float, search_dirs: Sequence[str]) -> Element:
         return element
     element.final = source
     element.frames = figure_steps(source)
+    if element.frames and os.path.isfile(step_path(source, 0)):
+        element.opening = step_path(source, 0)
     for step in range(1, len(element.frames) + 1):
         directory = motion_dir(source, step)
         if os.path.isdir(directory):
@@ -669,7 +723,7 @@ def _slide_image_paths(slides_dir: str) -> Dict[int, str]:
 def _write_manifest(result: StagingResult) -> str:
     data = {
         "count": len(result.slides),
-        "slides": [slide.to_dict() for slide in result.slides],
+        "slides": [slide.to_dict(result.outdir) for slide in result.slides],
         "warnings": result.warnings,
     }
     path = os.path.join(result.outdir, MANIFEST_NAME)

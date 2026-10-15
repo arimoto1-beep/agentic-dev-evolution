@@ -54,7 +54,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field, replace
-from typing import Dict, List, Mapping, Optional
+from typing import Dict, List, Mapping, Optional, Tuple
 
 #: 文の終わりとみなす記号(NFKC 正規化のあとなので半角と全角の両方を見る)。
 SENTENCE_ENDINGS = "。！？!?"
@@ -79,9 +79,27 @@ _CLOSE_TO_OPEN = {close: open_ for open_, close in _BRACKET_PAIRS.items()}
 #:     〔2〕        画面を 2 段目へ進める(1 から数える)
 #:     〔全体〕     画面をすべて出した状態にする
 #:     〔間 1.5〕   ここで 1.5 秒の間を足す
+#:     〔声 ゆっくり〕 この文から、話す調子を変える(`PACES`)。その画面の終わりか、
+#:                 次の〔声 …〕まで続く
 CUE_ALL = "全体"
-_CUE = re.compile(r"〔\s*(\d{1,3}|全体|間\s*\d+(?:\.\d+)?)\s*〕")
+_CUE = re.compile(
+    r"〔\s*(\d{1,3}|全体|間\s*\d+(?:\.\d+)?|声\s*(?:ゆっくり|速め|ふつう))\s*〕"
+)
 _CUE_PAUSE = re.compile(r"^間\s*(\d+(?:\.\d+)?)$")
+_CUE_VOICE = re.compile(r"^声\s*(\S+)$")
+
+#: 話す調子。名前 ->(拍の長さに掛ける倍率, 高さの動きに掛ける倍率)。
+#:
+#: 1 本を同じ調子で読み続けると、山場の文も、つなぎの文も、同じ重さで聞こえる
+#: (gen37。20 分の動画で、発話のあいだの間は 573 個のうち 557 個が 0.25 - 0.7 秒、
+#: 画面ごとの声の高さは 1 半音の幅に収まっていた)。調子は 3 つだけにして、幅も
+#: 小さくしてある。大きく変えると、合成音声は別人のように聞こえる。
+PACE_NORMAL = "ふつう"
+PACES: Dict[str, Tuple[float, float]] = {
+    "ゆっくり": (1.14, 1.12),  # 問い・結論。遅く、抑揚を少し大きく
+    "速め": (0.92, 1.0),  # 前の画面の繰り返しや、並べて言うだけの文
+    PACE_NORMAL: (1.0, 1.0),
+}
 
 _URL = re.compile(r"https?://\S+|www\.[^\s、。]+")
 # 行頭の箇条書き記号。文中の「・」は区切り文字(「A・B」)なので、行頭だけを見る。
@@ -182,6 +200,8 @@ class Utterance:
     spoken: str = ""
     #: この区切りの直前に書かれていた合図(`2` や `全体`)。無ければ空。
     cue: str = ""
+    #: 話す調子(`PACES` の名前)。ふつうなら空。
+    pace: str = ""
 
     @property
     def to_speak(self) -> str:
@@ -220,6 +240,7 @@ class ReadingPlan:
                 {"text": u.text, "pause_after": round(u.pause_after, 3)}
                 | ({"spoken": u.spoken} if u.spoken else {})
                 | ({"cue": u.cue} if u.cue else {})
+                | ({"pace": u.pace} if u.pace else {})
                 for u in self.utterances
             ],
             "notes": self.notes,
@@ -253,6 +274,7 @@ def plan_reading(
 
     plan.tail_silence = style.tail_silence + max(0.0, hold)
     pending_cue = ""  # 次の区切りに付ける合図
+    pace = ""  # いまの話す調子(その画面の終わりまで続く)
     for line_number, line in enumerate(lines):
         last_line = line_number == len(lines) - 1
         parts = _split_cues(line)
@@ -260,6 +282,9 @@ def plan_reading(
         for part_number, (kind, value) in enumerate(parts):
             if kind == _STEP:
                 pending_cue = value
+                continue
+            if kind == _VOICE:
+                pace = "" if value == PACE_NORMAL else value
                 continue
             if kind == _PAUSE:
                 # 間は直前の区切りの後ろに足す。まだ何も読んでいなければ、
@@ -289,7 +314,9 @@ def plan_reading(
                     pause = style.clause_pause
                 spoken = _apply_dictionary(piece, style, plan.notes)
                 plan.utterances.append(
-                    Utterance(piece, pause, spoken if spoken != piece else "", cue=pending_cue)
+                    Utterance(
+                        piece, pause, spoken if spoken != piece else "", cue=pending_cue, pace=pace
+                    )
                 )
                 pending_cue = ""
     if plan.utterances and plan.utterances[-1].pause_after:
@@ -301,7 +328,7 @@ def plan_reading(
     return plan
 
 
-_TEXT, _STEP, _PAUSE = "text", "step", "pause"
+_TEXT, _STEP, _PAUSE, _VOICE = "text", "step", "pause", "voice"
 
 
 def _split_cues(line: str) -> List[tuple[str, str]]:
@@ -314,8 +341,11 @@ def _split_cues(line: str) -> List[tuple[str, str]]:
             parts.append((_TEXT, before))
         value = matched.group(1).strip()
         pause = _CUE_PAUSE.match(value)
+        voice = _CUE_VOICE.match(value)
         if pause:
             parts.append((_PAUSE, pause.group(1)))
+        elif voice:
+            parts.append((_VOICE, voice.group(1)))
         else:
             parts.append((_STEP, value))
         position = matched.end()

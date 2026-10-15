@@ -28,6 +28,7 @@ from .model import (
     DIAGRAM_FRAME,
     KIND_CODE,
     KIND_DIAGRAM,
+    KIND_FULL,
     KIND_IMAGE,
     KIND_SECTION,
     KIND_TABLE,
@@ -209,6 +210,8 @@ class Renderer:
         elif slide.kind == KIND_SECTION:
             pptx_slide = self._section_slide(prs, slide)
             self._draw_footer(pptx_slide, number)
+        elif slide.kind == KIND_FULL:
+            pptx_slide = self._full_slide(prs, slide)
         else:
             pptx_slide = prs.slides.add_slide(prs.slide_layouts[_LAYOUT_TITLE_ONLY])
             self._paint_background(pptx_slide, self.style.theme.background)
@@ -434,6 +437,48 @@ class Renderer:
             style.title_rule_height,
             style.color_accent,
         )
+        return pptx_slide
+
+    def _full_slide(self, prs: Presentation, slide: Slide):
+        """絵 1 枚を画面いっぱいに置く。見出しの行も、資料名とページ番号も置かない。
+
+        動画の 1 場面として描いた絵は、スライドの枠(見出し・罫線・ページ番号)に
+        入れると「資料を映した動画」に見える(gen37)。絵の側が画面全体を持つ。
+
+        見出しは消さずに、絵の下に残す。章立て(`captions.build_chapters`)と、
+        資料を開いた人がアウトラインで追えるようにするため。絵は見出しより後に
+        置くので、画面では見出しが絵に隠れる。
+        """
+        pptx_slide = prs.slides.add_slide(prs.slide_layouts[_LAYOUT_TITLE_ONLY])
+        self._paint_background(pptx_slide, self.style.theme.background)
+        title_ph = pptx_slide.shapes.title
+        if title_ph is not None:
+            if slide.title:
+                style = self.style
+                _place(title_ph, style.title_left, style.title_top, style.title_width, style.title_height)
+                self._fill_text(
+                    title_ph.text_frame,
+                    [[Run(slide.title)]],
+                    size=style.slide_title_size,
+                    color=style.color_title,
+                    bold=True,
+                    align=PP_ALIGN.LEFT,
+                    anchor=MSO_ANCHOR.MIDDLE,
+                    shrink_to_fit=True,
+                )
+            else:
+                _remove_shape(title_ph)
+        width, height = prs.slide_width, prs.slide_height
+        picture = pptx_slide.shapes.add_picture(slide.image_path, 0, 0, width=width)
+        if picture.height > height:  # 16:9 より縦長の絵。引き伸ばさずに収める
+            ratio = height / picture.height
+            picture.height = int(picture.height * ratio)
+            picture.width = int(picture.width * ratio)
+        picture.left = int((width - picture.width) / 2)
+        picture.top = int((height - picture.height) / 2)
+        picture._element.nvPicPr.cNvPr.set("descr", self._image_reference(slide.image_path))
+        if slide.image_alt:
+            picture._element.nvPicPr.cNvPr.set("title", slide.image_alt)
         return pptx_slide
 
     def _draw_slide_title(self, pptx_slide, title: str, label: str = "") -> None:

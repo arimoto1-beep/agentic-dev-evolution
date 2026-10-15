@@ -114,6 +114,9 @@ class SpeechPiece:
 
     text: str
     pause_after: float = 0.0
+    #: 話す調子(`reading.PACES` の名前)。ふつうなら空。調子を変えられない
+    #: エンジンは、これを見ずにふつうに読む。
+    pace: str = ""
 
 
 @dataclass

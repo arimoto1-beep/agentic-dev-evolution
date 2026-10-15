@@ -61,6 +61,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+from .reading import PACE_NORMAL, PACES
 from .speech import (
     AudioFormat,
     SpeechFailure,
@@ -640,6 +641,7 @@ class VoicevoxEngine:
 
         combined = self._mora_data(combined, style_id, timeout)
         counts = [len(group) for group in groups]
+        _apply_paces(combined, counts, [p.pace for p in pieces])
         _place_pauses(combined, counts, [p.pause_after for p in pieces], speed)
         return combined, counts
 
@@ -666,6 +668,35 @@ def _json_response(url: str, raw: bytes, what: str) -> object:
         return json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HttpFailure(url, f"{what}を取得できません: {exc}") from exc
+
+
+def _apply_paces(phrases: List[dict], lengths: Sequence[int], paces: Sequence[str]) -> None:
+    """区切りごとの話す調子を、拍の長さと高さに掛ける(その場で書き換える)。
+
+    速さ(speedScale)と抑揚(intonationScale)は 1 回の合成に 1 つしか渡せない。
+    1 枚分はひと続きに合成するので(区切って合成すると、つなぎ目で音程が跳ねる)、
+    区切りごとに変えたいときは、合成へ渡す拍の長さと高さのほうを書き換える。
+    長さを書き換えても、区切りの始まる時刻は `piece_offsets` がそのまま求められる。
+
+    高さは、その区切りの中での平均からの離れ方を広げる(エンジンの抑揚と同じ考え方。
+    高さそのものは動かさない)。
+    """
+    position = 0
+    for length, pace in zip(lengths, paces):
+        group = phrases[position : position + length]
+        position += length
+        slow, lilt = PACES.get(pace or PACE_NORMAL, PACES[PACE_NORMAL])
+        if slow == 1.0 and lilt == 1.0:
+            continue
+        moras = [mora for phrase in group for mora in (phrase.get("moras") or [])]
+        voiced = [float(m["pitch"]) for m in moras if float(m.get("pitch") or 0.0) > 0.0]
+        center = sum(voiced) / len(voiced) if voiced else 0.0
+        for mora in moras:
+            for key in ("consonant_length", "vowel_length"):
+                if mora.get(key):
+                    mora[key] = float(mora[key]) * slow
+            if float(mora.get("pitch") or 0.0) > 0.0:
+                mora["pitch"] = center + (float(mora["pitch"]) - center) * lilt
 
 
 def _place_pauses(

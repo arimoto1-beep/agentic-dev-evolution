@@ -18,6 +18,13 @@
   選んで** 同じ絵を何通りにも書き出す。動画で、話に合わせて絵を 1 つずつ足したり、
   いま話している部品だけを濃く残したりするのに使う(`save_step`。`staging.py`)
 * 動き(`save_motion`)。少しずつ変えた絵を連番で書き出す
+* 段の並び(`save_steps`)。「何段目に、どの層を出し、どれを濃く残すか」を並べて渡すと、
+  段ごとの絵と、**前の段から移るときの動き** をまとめて書き出す。新しく出る層は
+  少し下から上がりながら現れ、濃さが変わる層はその場で変わる。画面全体を溶かすと
+  「どこが変わったのか」を目で探すことになるが、変わるものだけが動けば、目はそこへ行く
+
+画面いっぱいの場面(`レイアウト: 全画面`)を描くときは、`Sketch(*VIDEO_SIZE)` で
+動画のコマと同じ大きさの画用紙を使う。
 
 座標は左上が原点、右が +x、下が +y(単位は書き出す画像の画素)。
 """
@@ -29,7 +36,7 @@ import math
 import os
 import shutil
 from contextlib import contextmanager
-from typing import Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -41,6 +48,14 @@ Color = Tuple[int, int, int]
 
 #: 資料の本文領域(11.53 x 5.05 inch)と同じ縦横比。図だけの画面なら、縮めずに収まる。
 DEFAULT_SIZE = (2400, 1050)
+
+#: 動画のコマと同じ大きさ。画面いっぱいの場面(`レイアウト: 全画面`)を描くときに使う。
+VIDEO_SIZE = (1920, 1080)
+
+#: 段が変わるときの動きの、既定の長さ(秒)と、新しく出る層が上がってくる距離(画素)。
+#: 短く、小さくしてある。目が「いま出たもの」へ向けば足り、動きそのものを見せたいわけではない。
+ENTER_SECONDS = 0.4
+ENTER_RISE = 26
 
 #: 何倍の大きさで描いてから縮めるか。
 SUPERSAMPLE = 2
@@ -361,10 +376,11 @@ class Sketch:
         color: Color = INK,
         bold: bool = False,
         anchor: str = "mm",
-        halo: bool = True,
+        halo=True,
     ) -> None:
         """文字。`anchor` は Pillow と同じ(左右 l/m/r と上下 t/m/b)。改行できる。
-        `halo` は文字の縁の白い縁取り(線や塗りの上に重なっても読めるように)。"""
+        `halo` は文字の縁の縁取り(線や塗りの上に重なっても読めるように)。True なら白、
+        色を渡すとその色(白くない地の上に描くとき、地の色を渡す)。"""
         x, y = self._map(at)
         font = self._font(size, bold)
         lines = text.split("\n")
@@ -378,7 +394,7 @@ class Sketch:
                 fill=color,
                 anchor=anchor[0] + anchor[1].replace("t", "a").replace("b", "d"),
                 stroke_width=self._w(5) if halo else 0,
-                stroke_fill=WHITE,
+                stroke_fill=WHITE if halo is True else (halo or WHITE),
             )
 
     def text_width(self, text: str, size: float = 44, bold: bool = False) -> float:
@@ -416,23 +432,169 @@ class Sketch:
         層の外で描いたものは、どちらを指定してもそのまま出る。
         """
         if not self._layers:
-            return self._image.resize((self.width, self.height), Image.LANCZOS)
-        known = set(self.layers())
+            return self._shrink(self._image)
+        return self._shrink(self._stack(self._layers, self.levels(show, focus, faded)))
+
+    def levels(
+        self,
+        show: Optional[Sequence[str]] = None,
+        focus: Optional[Sequence[str]] = None,
+        faded: float = FADED,
+    ) -> Dict[str, float]:
+        """層ごとの濃さ(0 = 出さない、1 = そのまま)。`image` と同じ選び方。"""
+        known = self.layers()
         for name in list(show or []) + list(focus or []):
             if name not in known:
                 raise SketchError(
-                    f"層がありません: {name}(あるのは {' / '.join(self.layers())})"
+                    f"層がありません: {name}(あるのは {' / '.join(known)})"
                 )
-        canvas = self._ground.convert("RGBA")
-        for name, layer in self._layers:
-            if name and show is not None and name not in show:
+        levels: Dict[str, float] = {}
+        for name in known:
+            if show is not None and name not in show:
+                levels[name] = 0.0
+            elif focus is not None and name not in focus:
+                levels[name] = faded
+            else:
+                levels[name] = 1.0
+        return levels
+
+    def _stack(
+        self,
+        layers: Sequence[Tuple[str, Image.Image]],
+        levels: Mapping[str, float],
+        shifts: Optional[Mapping[str, Point]] = None,
+        ground: Optional[Image.Image] = None,
+    ) -> Image.Image:
+        """層を、指定した濃さとずれで重ねる(描いた大きさのまま)。"""
+        canvas = (ground if ground is not None else self._ground).convert("RGBA")
+        for name, layer in layers:
+            level = levels.get(name, 1.0) if name else 1.0
+            if level <= 0.0:
                 continue
-            if name and focus is not None and name not in focus:
-                alpha = layer.getchannel("A").point(lambda value: int(value * faded))
+            if level < 1.0:
+                alpha = layer.getchannel("A").point(lambda value, k=level: int(value * k))
                 layer = layer.copy()
                 layer.putalpha(alpha)
-            canvas.alpha_composite(layer)
-        return canvas.convert("RGB").resize((self.width, self.height), Image.LANCZOS)
+            dx, dy = (shifts or {}).get(name, (0.0, 0.0)) if name else (0.0, 0.0)
+            _composite(canvas, layer, int(round(dx * self._k)), int(round(dy * self._k)))
+        return canvas
+
+    def _shrink(self, canvas: Image.Image) -> Image.Image:
+        # ちょうど整数分の 1 に縮める。画素をまとめて平均するだけなので速い
+        # (動きの連番では、1 コマごとにここを通る)。
+        return canvas.convert("RGB").reduce(self._k)
+
+    def transition(
+        self,
+        before: Mapping[str, object],
+        after: Mapping[str, object],
+        seconds: float = ENTER_SECONDS,
+        rise: float = ENTER_RISE,
+        fps: int = 30,
+    ) -> List[Image.Image]:
+        """`before` の姿から `after` の姿へ移る動き(1 コマに 1 枚。最後の 1 枚が `after`)。
+
+        `before` `after` は `image` に渡す引数(`show` `focus` `faded`)の辞書。
+        新しく出る層は、`rise` 画素だけ下から上がりながら現れる。消える層・濃さが
+        変わる層は、その場で変わる。どれも、ゆっくり動き出してゆっくり止まる。
+        """
+        start = self.levels(before.get("show"), before.get("focus"), before.get("faded", FADED))
+        end = self.levels(after.get("show"), after.get("focus"), after.get("faded", FADED))
+        moving = {name for name in end if abs(start[name] - end[name]) > 1e-6}
+        runs = self._runs(moving, end)
+        count = max(1, int(round(seconds * fps)))
+        frames: List[Image.Image] = []
+        for index in range(1, count + 1):
+            t = ease(index / count)
+            levels = {name: start[name] + (end[name] - start[name]) * t for name in moving}
+            shifts = {
+                name: (0.0, rise * (1.0 - t)) for name in moving if start[name] <= 0.0 < end[name]
+            }
+            frames.append(self._shrink(self._stack(runs, levels, shifts)))
+        return frames
+
+    def _runs(
+        self, moving: Iterable[str], levels: Mapping[str, float]
+    ) -> List[Tuple[str, Image.Image]]:
+        """動かない層を、続いているぶんだけ 1 枚にまとめる(コマごとに重ね直す枚数を減らす)。"""
+        moving = set(moving)
+        runs: List[Tuple[str, Image.Image]] = []
+        pending: List[Tuple[str, Image.Image]] = []
+
+        def flush() -> None:
+            if pending:
+                runs.append(("", self._stack(pending, levels, ground=self._blank())))
+                pending.clear()
+
+        for name, layer in self._layers:
+            if name in moving:
+                flush()
+                runs.append((name, layer))
+            else:
+                pending.append((name, layer))
+        flush()
+        return runs
+
+    def save_steps(
+        self,
+        path: str,
+        steps: Sequence[Mapping[str, object]],
+        opening: Optional[Mapping[str, object]] = None,
+        seconds: float = ENTER_SECONDS,
+        rise: float = ENTER_RISE,
+        fps: int = 30,
+    ) -> List[str]:
+        """段の並びを、絵と動きにして書き出す(`図.png` `図@1.png` … と `図@2/000.png` …)。
+
+        `steps` の 1 つが 1 段。`image` に渡す引数(`show` `focus` `faded`)の辞書で、
+        ほかに次のものを書ける。
+
+            seconds   この段へ移る動きの長さ(秒)。0 なら動きを付けない
+            rise      新しく出る層が上がってくる距離(画素)
+            motion    この段へ移る動きを、自分で用意した絵の並びにする
+                      (部品そのものを動かすとき。最後の 1 枚は、この段の姿にする)
+            image     この段の姿を、自分で用意した絵にする(別の絵へ切り替えるとき)
+
+        `opening` を渡すと、最初の合図までの姿(`図@0.png`)も書き出し、1 段目にも
+        そこからの動きを付ける。`図.png`(資料に載る姿)は最後の段と同じ絵になる。
+        """
+        clear_steps(path)
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        written: List[str] = []
+        previous: Optional[Mapping[str, object]] = None
+        if opening is not None:
+            target = step_path(path, 0)
+            self._still(opening).save(target, optimize=True)
+            written.append(target)
+            previous = opening
+        last: Optional[Image.Image] = None
+        for number, step in enumerate(steps, start=1):
+            last = self._still(step)
+            target = step_path(path, number)
+            last.save(target, optimize=True)
+            written.append(target)
+            frames = step.get("motion")
+            if frames is None and previous is not None and "image" not in previous:
+                length = float(step.get("seconds", seconds))
+                if length > 0 and "image" not in step:
+                    frames = self.transition(
+                        previous, step, length, float(step.get("rise", rise)), fps
+                    )
+            if frames:
+                save_motion(path, number, frames)
+            previous = step
+        if last is not None:
+            last.save(path, optimize=True)
+        return written
+
+    def _still(self, step: Mapping[str, object]) -> Image.Image:
+        if step.get("image") is not None:
+            return step["image"]  # type: ignore[return-value]
+        return self.image(
+            show=step.get("show"),  # type: ignore[arg-type]
+            focus=step.get("focus"),  # type: ignore[arg-type]
+            faded=float(step.get("faded", FADED)),
+        )
 
     def save(self, path: str) -> str:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -455,6 +617,19 @@ class Sketch:
         os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
         self.image(show=show, focus=focus).save(target, optimize=True)
         return target
+
+
+def _composite(canvas: Image.Image, layer: Image.Image, dx: int, dy: int) -> None:
+    """`layer` を (dx, dy) だけずらして `canvas` に重ねる(はみ出した分は捨てる)。"""
+    if dx == 0 and dy == 0:
+        canvas.alpha_composite(layer)
+        return
+    width, height = canvas.size
+    left, top = max(0, -dx), max(0, -dy)
+    right, bottom = min(width, width - dx), min(height, height - dy)
+    if right <= left or bottom <= top:
+        return
+    canvas.alpha_composite(layer, dest=(max(0, dx), max(0, dy)), source=(left, top, right, bottom))
 
 
 def clear_steps(path: str) -> None:

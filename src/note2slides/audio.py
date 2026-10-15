@@ -344,7 +344,7 @@ def _synthesize(
                 index=job_index,
                 # 合成へ渡すのは読み(読み方辞書を当てたあと)。字幕は元の文字を
                 # 使うので、ここだけが `to_speak` になる(`reading.Utterance`)。
-                pieces=[SpeechPiece(u.to_speak, u.pause_after) for u in plan.utterances],
+                pieces=[SpeechPiece(u.to_speak, u.pause_after, u.pace) for u in plan.utterances],
                 out_path=out_path,
                 slide=segment.index,
             )
