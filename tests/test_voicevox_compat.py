@@ -229,7 +229,10 @@ def test_sentences_get_a_pause_between_them(tmp_path, engine):
     )
 
     assert tight.clips[0].duration > 1.0  # 実際に声が入っている
-    assert spaced.clips[0].duration == pytest.approx(tight.clips[0].duration + 0.5, abs=0.05)
+    # 間の 0.5 秒に加えて、文末の拍が少し延びる(Gen38 から、切れ目を音程・長さを決める前に
+    # エンジンへ伝えるので、人が間の手前でするのと同じく、文の終わりをゆっくり言う)。
+    added = spaced.clips[0].duration - tight.clips[0].duration
+    assert 0.5 - 0.05 <= added <= 0.5 + 0.3
 
 
 def test_standard_narration_voice_exists_in_the_engine(nemo):

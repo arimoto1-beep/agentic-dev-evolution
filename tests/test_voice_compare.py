@@ -95,8 +95,8 @@ def test_candidate_overrides_only_voice_settings():
 def test_candidate_describes_only_changed_settings():
     base = AudioOptions()
     assert Candidate(id="a", voice="v", reason="").describe_settings(base) == "既定のまま"
-    described = Candidate(id="b", voice="v", reason="", speed=0.95, line_pause=0.9).describe_settings(base)
-    assert "速さ 0.95" in described and "行の間 0.9秒" in described
+    described = Candidate(id="b", voice="v", reason="", speed=0.95, line_pause=1.3).describe_settings(base)
+    assert "速さ 0.95" in described and "行の間 1.3秒" in described
 
 
 def test_builtin_candidates_include_current_standard():
@@ -424,7 +424,7 @@ def test_index_records_settings_and_files(tmp_path):
     result = run(tmp_path, preview_seconds=1.0)
 
     index = json.load(open(result.index_path, encoding="utf-8"))
-    assert index["base"]["reading"]["sentence_pause"] == 0.35
+    assert index["base"]["reading"]["sentence_pause"] == ReadingStyle().sentence_pause
     assert index["preview"]["file"] == PREVIEW_NAME
     assert [mark["id"] for mark in index["preview"]["marks"]] == ["alpha", "beta"]
 

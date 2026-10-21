@@ -227,8 +227,9 @@ CANDIDATES: Sequence[Candidate] = (
         role="Gen7 標準の設定違い(落ち着かせた版)",
         speed=0.95,
         intonation=0.9,
-        sentence_pause=0.45,
-        line_pause=0.75,
+        # 基準より広げる(gen38 で基準が 0.6 / 0.9 秒になったので、同じだけ上に置き直した)。
+        sentence_pause=0.75,
+        line_pause=1.1,
         reason=(
             "声を変えずに、読み上げ設定だけで長時間向きにできるかを見る候補。"
             "アナウンス調は 1 文ごとの抑揚がはっきりしていて、短い動画では聞き取りやすい反面、"

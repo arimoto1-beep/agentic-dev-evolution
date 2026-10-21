@@ -12,7 +12,7 @@
 
 import pytest
 
-from note2slides.reading import PACES, plan_reading, strip_cues
+from note2slides.reading import PACES, ReadingStyle, plan_reading, strip_cues
 from note2slides.voicevox import _apply_paces, piece_offsets
 
 
@@ -39,8 +39,9 @@ def test_voice_cue_does_not_carry_over_to_the_next_screen():
 def test_voice_cue_works_together_with_step_and_pause_cues():
     plan = plan_reading("前置き。〔間 0.5〕〔声 ゆっくり〕〔3〕問いです。〔間 1.0〕〔声 ふつう〕〔4〕続きです。")
     assert [(u.cue, u.pace) for u in plan.utterances] == [("", ""), ("3", "ゆっくり"), ("4", "")]
-    assert plan.utterances[0].pause_after == pytest.approx(0.35 + 0.5)
-    assert plan.utterances[1].pause_after == pytest.approx(0.35 + 1.0)
+    sentence = ReadingStyle().sentence_pause
+    assert plan.utterances[0].pause_after == pytest.approx(sentence + 0.5)
+    assert plan.utterances[1].pause_after == pytest.approx(sentence + 1.0)
 
 
 def test_unknown_voice_name_stays_in_the_text():
@@ -111,5 +112,5 @@ def test_screen_changes_stay_on_the_sentence_after_the_pace_changes_the_lengths(
 
 def test_paces_are_kept_small():
     # 大きく変えると、合成音声は別人のように聞こえる。耳で確かめていない幅には広げない。
-    for slow, lilt in PACES.values():
-        assert 0.85 <= slow <= 1.2 and 0.9 <= lilt <= 1.2
+    for slow, lilt, lift in PACES.values():
+        assert 0.85 <= slow <= 1.2 and 0.8 <= lilt <= 1.2 and -2.0 <= lift <= 2.0

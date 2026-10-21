@@ -83,10 +83,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     reading_group = parser.add_argument_group("読み方と間")
     reading_group.add_argument(
-        "--sentence-pause", type=float, default=0.35, help="文と文の間(秒、既定: 0.35)"
+        "--sentence-pause",
+        type=float,
+        default=ReadingStyle.sentence_pause,
+        help=f"文と文の間(秒、既定: {ReadingStyle.sentence_pause})",
     )
     reading_group.add_argument(
-        "--line-pause", type=float, default=0.6, help="行と行の間(秒、既定: 0.6)"
+        "--line-pause",
+        type=float,
+        default=ReadingStyle.line_pause,
+        help=f"行と行の間(秒、既定: {ReadingStyle.line_pause})",
     )
     reading_group.add_argument(
         "--lead-silence",

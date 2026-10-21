@@ -275,7 +275,7 @@ def test_reading_is_recorded_for_review():
     plan = plan_reading("最初の文です。次の文です。")
 
     assert plan.reading == "最初の文です。 次の文です。"
-    assert plan.to_dict()["utterances"][0]["pause_after"] == pytest.approx(0.35)
+    assert plan.to_dict()["utterances"][0]["pause_after"] == pytest.approx(ReadingStyle().sentence_pause)
     assert plan.to_dict()["tail_silence"] == pytest.approx(0.7)
 
 

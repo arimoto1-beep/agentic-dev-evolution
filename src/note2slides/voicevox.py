@@ -52,7 +52,9 @@ from __future__ import annotations
 
 import glob
 import json
+import math
 import os
+import re
 import subprocess
 import time
 import urllib.error
@@ -61,7 +63,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from .reading import PACE_NORMAL, PACES
+from .reading import CLAUSE_ENDINGS, PACE_NORMAL, PACES, STRESS
 from .speech import (
     AudioFormat,
     SpeechFailure,
@@ -91,6 +93,25 @@ DEFAULT_STARTUP_TIMEOUT = 180.0
 #: 読み上げの長さも間も変わらず、変わるのは前後の拍の作られ方だけ。0.3 秒は、
 #: これ以上増やしても波形が変わらなくなる長さ(0.5 秒との差が測定できない)。
 SYNTH_PADDING = 0.3
+
+#: 読点(、)のところにエンジン自身が置く間を、この倍率で縮める(下限・上限つき)。
+#:
+#: VOICEVOX は読点ごとに 0.3 - 0.5 秒(中央値 0.39 秒)の間を置く。1 文だけを読むなら
+#: 自然な長さだが、ナレーションでは文と文の間より長くなり、聞く人は間の長さから
+#: 「文が終わったのか、文の途中なのか」を聞き分けられなくなる(gen38。gen37 の動画は、
+#: 約 1.2 秒話して約 0.4 秒止まる、を 800 回近くくり返していた)。
+#: 縮めるのは長さだけで、読点のところで切れていることはエンジンに伝えたまま音程を決める。
+INNER_PAUSE_SCALE = 0.7
+INNER_PAUSE_RANGE = (0.15, 0.32)
+
+#: 片仮名の語のあいだの「・」(ド・ディオン、レオナルド・ダ・ヴィンチ)で止まる長さ。
+#:
+#: VOICEVOX は「・」を読点と同じ区切りにして 0.45 秒止まり、名前を「ド……ディオン」と
+#: 切って読む(gen37 で 49 回。音声認識も「ド、ディオン」と書き起こした)。「・」を消すと
+#: 1 語として読まれてアクセントが変わり、自然さの推定(UTMOS)はかえって下がった(gen38)。
+#: そこで区切り(2 つのアクセント句)はそのままにして、止まる長さだけを縮める。
+WORD_DOT_PAUSE = 0.08
+_WORD_DOT = re.compile(r"(?=([ァ-ヺー])・([ァ-ヺ]))")
 
 _ALTERNATIVE_HINT = (
     "Windows 標準の音声合成を使う場合は --engine sapi または --engine onecore を指定できます。"
@@ -569,6 +590,7 @@ class VoicevoxEngine:
             except OSError as exc:
                 report.failures.append(SpeechFailure(job.index, f"音声を保存できません: {exc}"))
                 continue
+            report.warnings.extend(job.warnings)
             if on_done:
                 on_done(job.index)
         return report
@@ -592,7 +614,7 @@ class VoicevoxEngine:
         intonation: float,
         timeout: float,
     ) -> None:
-        phrases, counts = self._read_continuously(job.pieces, style.id, speed, timeout)
+        phrases, counts = self._read_continuously(job.pieces, style.id, speed, timeout, job)
         # 区切りが何秒目から始まるかは、合成の前に決まっている(拍の長さの合計)。
         # 音を聞き直さずに、画面を変える時刻として使える。
         job.offsets = piece_offsets(phrases, counts, speed, SYNTH_PADDING)
@@ -624,12 +646,25 @@ class VoicevoxEngine:
             f.write(wav)
 
     def _read_continuously(
-        self, pieces: Sequence[SpeechPiece], style_id: int, speed: float, timeout: float
+        self,
+        pieces: Sequence[SpeechPiece],
+        style_id: int,
+        speed: float,
+        timeout: float,
+        job: Optional[SpeechJob] = None,
     ) -> Tuple[List[dict], List[int]]:
         """1 枚分の区切りを、ひと続きに読み上げるアクセント句の並びにする。
 
         区切りごとに読みを作ってからつなぎ、音程は 1 枚分まとめて決める。
         こうしないと、区切りの先頭が毎回「文章の書き出し」の音程になる。
+
+        ただし **どこで切れるかは、音程を決める前にエンジンへ伝える**(`_mark_breaks`)。
+        gen37 までは、切れ目の無い 1 本の文として音程を決めさせ、あとから間を差し込んでいた。
+        エンジンは文の終わりを知らないので、文末が下がらず(34% は上がって終わる)、
+        次の文が前の文の続きとして低く始まっていた(57%)。間はあっても、声の形の上では
+        文が終わっていなかった。切れ目を伝えれば、文末は下がり、次の文で高さが戻る
+        (1 文ずつ別々に読ませたときと近い形になる)。それでも 1 回の読み上げのままなので、
+        別々に合成したときのような書き出しの跳ね上がりは起きない。
         """
         groups = [self._accent_phrases(piece.text, style_id, timeout) for piece in pieces]
         combined = [phrase for group in groups for phrase in group]
@@ -639,11 +674,32 @@ class VoicevoxEngine:
                 f"読み上げられる文字がありませんでした: {''.join(p.text for p in pieces)!r}",
             )
 
-        combined = self._mora_data(combined, style_id, timeout)
         counts = [len(group) for group in groups]
+        breaks = [_breaks_after(piece) for piece in pieces]
+        _mark_breaks(combined, counts, breaks)
+        combined = self._mora_data(combined, style_id, timeout)
+        _shorten_inner_pauses(combined)
+        _shorten_word_dots(combined, counts, [p.text for p in pieces])
         _apply_paces(combined, counts, [p.pace for p in pieces])
-        _place_pauses(combined, counts, [p.pause_after for p in pieces], speed)
+        stresses = [
+            [(word, self._kana(word, style_id, timeout)) for word in piece.stress] for piece in pieces
+        ]
+        missed = _apply_stress(combined, counts, stresses)
+        if job is not None:
+            job.warnings.extend(
+                f"強調する語が読みの中に見つからないので、強調せずに読みました: {word}"
+                for word in missed
+            )
+        _place_pauses(combined, counts, [p.pause_after for p in pieces], speed, breaks)
         return combined, counts
+
+    def _kana(self, text: str, style_id: int, timeout: float) -> List[str]:
+        """語の読み(拍の並び)。強調する語を、文の読みの中から探すのに使う。"""
+        return [
+            str(mora.get("text", ""))
+            for phrase in self._accent_phrases(text, style_id, timeout)
+            for mora in phrase.get("moras") or []
+        ]
 
     def _accent_phrases(self, text: str, style_id: int, timeout: float) -> List[dict]:
         query = urllib.parse.urlencode({"text": text, "speaker": style_id})
@@ -678,29 +734,145 @@ def _apply_paces(phrases: List[dict], lengths: Sequence[int], paces: Sequence[st
     区切りごとに変えたいときは、合成へ渡す拍の長さと高さのほうを書き換える。
     長さを書き換えても、区切りの始まる時刻は `piece_offsets` がそのまま求められる。
 
-    高さは、その区切りの中での平均からの離れ方を広げる(エンジンの抑揚と同じ考え方。
-    高さそのものは動かさない)。
+    高さの動きは、その区切りの中での平均からの離れ方を広げる(エンジンの抑揚と同じ考え方)。
+    声の高さそのもの(`lift`)は、区切り全体を同じだけ上げ下げする(文の中の形は変えない)。
     """
     position = 0
     for length, pace in zip(lengths, paces):
         group = phrases[position : position + length]
         position += length
-        slow, lilt = PACES.get(pace or PACE_NORMAL, PACES[PACE_NORMAL])
-        if slow == 1.0 and lilt == 1.0:
+        slow, lilt, lift = PACES.get(pace or PACE_NORMAL, PACES[PACE_NORMAL])
+        if slow == 1.0 and lilt == 1.0 and lift == 0.0:
             continue
         moras = [mora for phrase in group for mora in (phrase.get("moras") or [])]
-        voiced = [float(m["pitch"]) for m in moras if float(m.get("pitch") or 0.0) > 0.0]
-        center = sum(voiced) / len(voiced) if voiced else 0.0
-        for mora in moras:
+        _reshape(moras, slow, lilt, lift)
+
+
+def _semitones(value: float) -> float:
+    """半音を、VOICEVOX の高さ(周波数の自然対数)の差にする。"""
+    return value / 12.0 * math.log(2.0)
+
+
+def _reshape(moras: Sequence[dict], slow: float, lilt: float, lift: float) -> None:
+    """拍の長さに `slow` を掛け、高さの動きを `lilt` 倍に広げ、`lift` 半音だけ上げる。"""
+    voiced = [float(m["pitch"]) for m in moras if float(m.get("pitch") or 0.0) > 0.0]
+    center = sum(voiced) / len(voiced) if voiced else 0.0
+    shift = _semitones(lift)
+    for mora in moras:
+        if slow != 1.0:
             for key in ("consonant_length", "vowel_length"):
                 if mora.get(key):
                     mora[key] = float(mora[key]) * slow
-            if float(mora.get("pitch") or 0.0) > 0.0:
-                mora["pitch"] = center + (float(mora["pitch"]) - center) * lilt
+        if float(mora.get("pitch") or 0.0) > 0.0:
+            mora["pitch"] = center + (float(mora["pitch"]) - center) * lilt + shift
+
+
+def _apply_stress(
+    phrases: List[dict],
+    lengths: Sequence[int],
+    stresses: Sequence[Sequence[Tuple[str, List[str]]]],
+) -> List[str]:
+    """強調する語の拍を、少し高く・少し長くし、同じ区切りの後ろを少し平らにする。
+
+    語は読み(拍の並び)で探す。区切りごとに、書かれた順に前から探す。
+    見つからなかった語を返す(強調せずに読む。黙って捨てると、効いていないことに気付けない)。
+    """
+    lift, slow, after = STRESS
+    missed: List[str] = []
+    position = 0
+    for length, words in zip(lengths, stresses):
+        group = phrases[position : position + length]
+        position += length
+        moras = [mora for phrase in group for mora in (phrase.get("moras") or [])]
+        texts = [str(mora.get("text", "")) for mora in moras]
+        start = 0
+        last_end = -1
+        for word, kana in words:
+            found = _find(texts, kana, start)
+            if found < 0:
+                missed.append(word)
+                continue
+            end = found + len(kana)
+            _reshape(moras[found:end], slow, 1.0, lift)
+            start = last_end = end
+        if last_end >= 0:
+            _reshape(moras[last_end:], 1.0, after, 0.0)
+    return missed
+
+
+def _find(texts: Sequence[str], kana: Sequence[str], start: int) -> int:
+    """拍の並び `texts` の中で、`kana` が `start` 以降に最初に現れる位置(無ければ -1)。"""
+    if not kana:
+        return -1
+    for at in range(start, len(texts) - len(kana) + 1):
+        if list(texts[at : at + len(kana)]) == list(kana):
+            return at
+    return -1
+
+
+def _breaks_after(piece: SpeechPiece) -> bool:
+    """この区切りのあとで、読み上げが切れるか(間を置くか、読点で終わるか)。"""
+    text = piece.text.rstrip()
+    return piece.pause_after > 0 or (bool(text) and text[-1] in CLAUSE_ENDINGS)
+
+
+def _mark_breaks(phrases: List[dict], lengths: Sequence[int], breaks: Sequence[bool]) -> None:
+    """音程を決める前に、区切りの終わりに無音の拍を置いておく(その場で書き換える)。
+
+    長さはここでは決めない(エンジンが決め直し、そのあと `_place_pauses` が置き直す)。
+    伝えたいのは「ここで切れる」ことだけ。読点で終わる区切り(文の途中の合図)は、
+    `accent_phrases` が末尾の読点を落とすので、ここで戻す。
+    """
+    end = 0
+    for length, broken in zip(lengths, breaks):
+        end += length
+        if broken and length:
+            phrases[end - 1]["pause_mora"] = _pause_mora(0.3)
+
+
+def _shorten_word_dots(phrases: List[dict], lengths: Sequence[int], texts: Sequence[str]) -> None:
+    """片仮名の語のあいだの「・」で止まる間を、`WORD_DOT_PAUSE` まで縮める。
+
+    エンジンは「・」の間も読点の間も同じ印(「、」)で返すので、原稿の「X・Y」と、
+    間のあるアクセント句の終わり(X)・次の句の始まり(Y)を、前から順に突き合わせて探す。
+    """
+    position = 0
+    for length, text in zip(lengths, texts):
+        group = phrases[position : position + length]
+        position += length
+        cursor = 0
+        for left, right in _WORD_DOT.findall(text):
+            for at in range(cursor, len(group) - 1):
+                pause = group[at].get("pause_mora")
+                if not pause:
+                    continue
+                before = "".join(str(m.get("text", "")) for m in group[at].get("moras") or [])
+                after = "".join(str(m.get("text", "")) for m in group[at + 1].get("moras") or [])
+                if (left == "ー" or before.endswith(left)) and after.startswith(right):
+                    pause["vowel_length"] = WORD_DOT_PAUSE
+                    cursor = at + 1
+                    break
+
+
+def _shorten_inner_pauses(phrases: List[dict]) -> None:
+    """エンジンが決めた間(読点・区切り)を、文の間より短くそろえる(`INNER_PAUSE_SCALE`)。
+
+    区切りの終わりの間は、このあと `_place_pauses` が書いたとおりの長さに置き直す。
+    """
+    low, high = INNER_PAUSE_RANGE
+    for phrase in phrases:
+        pause = phrase.get("pause_mora")
+        if pause and pause.get("vowel_length"):
+            length = float(pause["vowel_length"]) * INNER_PAUSE_SCALE
+            pause["vowel_length"] = min(high, max(low, length))
 
 
 def _place_pauses(
-    phrases: List[dict], lengths: Sequence[int], pauses: Sequence[float], speed: float
+    phrases: List[dict],
+    lengths: Sequence[int],
+    pauses: Sequence[float],
+    speed: float,
+    breaks: Optional[Sequence[bool]] = None,
 ) -> None:
     """区切りの終わりに、指定した長さの無音を置く(その場で書き換える)。
 
@@ -713,19 +885,27 @@ def _place_pauses(
 
     VOICEVOX は合成時にすべての長さを speedScale で割るため、指定した速さでも
     間が変わらないよう、あらかじめ掛けておく。
+
+    `breaks` は区切りごとに「読点で切れるか」(`_breaks_after`)。間を指定していない区切り
+    (文の途中の合図)でも、読点で終わっていれば、エンジンが決めた読点の間を残す。
+    gen37 までは消していて、合図を置いた読点だけ間が無くなっていた。
     """
+    breaks = list(breaks) if breaks is not None else [False] * len(lengths)
     end = 0
     boundary: Optional[int] = None  # 間を置ける最後の位置(直前の区切りの終わり)
+    keep = False  # 直前の区切りが読点で終わっているか
     pending = 0.0
-    for length, pause in zip(lengths, pauses):
+    for length, pause, broken in zip(lengths, pauses, breaks):
         if length:
             # 次の読みが始まるまでに溜まった間を、直前の区切りの終わりに置く。
             if boundary is not None:
-                phrases[boundary]["pause_mora"] = (
-                    _pause_mora(pending * max(speed, 0.0)) if pending > 0 else None
-                )
+                if pending > 0:
+                    phrases[boundary]["pause_mora"] = _pause_mora(pending * max(speed, 0.0))
+                elif not keep:
+                    phrases[boundary]["pause_mora"] = None
             end += length
             boundary = end - 1
+            keep = broken
             pending = 0.0
         # 読みが 1 つも作られなかった区切り(記号だけなど)の間は、次に持ち越す。
         pending += max(0.0, pause)

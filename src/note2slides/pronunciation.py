@@ -34,7 +34,7 @@ from __future__ import annotations
 import re
 import string
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 #: 1 文字ずつ読まれていても意図どおりとみなす長さ。`AI` `MCP` `SDK` のような
 #: 略語は 1 文字ずつが正しい読みなので、これを超えるものだけを挙げる。
@@ -205,6 +205,11 @@ class LineReading:
     text: str
     kana: str
     spoken: str = ""
+    #: 話す調子(`reading.PACES` の名前。ふつうなら空)と、強調する語。
+    #: 音を作る前に「どの文を、どの調子で読むか」を確かめるために持つ(推測の文が
+    #: 「結論」の調子になっていないか、など)。
+    pace: str = ""
+    stress: Tuple[str, ...] = ()
 
     @property
     def to_speak(self) -> str:
@@ -259,6 +264,8 @@ class PronunciationReport:
                     "lines": [
                         {"text": l.text, "kana": l.kana}
                         | ({"spoken": l.spoken} if l.spoken else {})
+                        | ({"pace": l.pace} if l.pace else {})
+                        | ({"stress": list(l.stress)} if l.stress else {})
                         for l in slide.lines
                     ],
                 }
@@ -313,6 +320,8 @@ def inspect_readings(
                     utterance.text,
                     read_kana(speak) if lines else "",
                     speak if speak != utterance.text else "",
+                    pace=getattr(utterance, "pace", ""),
+                    stress=tuple(getattr(utterance, "stress", ())),
                 )
             )
         report.slides.append(slide)

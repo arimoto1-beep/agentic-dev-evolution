@@ -73,33 +73,58 @@ _BRACKET_PAIRS = {
 _OPENING_BRACKETS = "".join(_BRACKET_PAIRS)
 _CLOSE_TO_OPEN = {close: open_ for open_, close in _BRACKET_PAIRS.items()}
 
-#: 合図(読み上げない印)。中身が下の 3 種類のどれかのときだけ合図として扱い、
+#: 話す調子。名前 ->(拍の長さに掛ける倍率, 高さの動きに掛ける倍率, 声の高さを上げ下げする半音)。
+#:
+#: 1 本を同じ調子で読み続けると、山場の文も、つなぎの文も、同じ重さで聞こえる
+#: (gen37。20 分の動画で、発話のあいだの間は 573 個のうち 557 個が 0.25 - 0.7 秒、
+#: 画面ごとの声の高さは 1 半音の幅に収まっていた)。
+#:
+#: gen38 から、**その文が何をしている文か**(役割)で書けるようにした。「ゆっくり」
+#: 「速め」は話し方の指定で、書く人が文ごとに数字の加減を考えることになる。役割で
+#: 書けば、同じ役割の文は動画のどこでも同じ話し方になり、別の題材でも同じ意味で使える。
+#: 幅はどれも小さい。大きく変えると、合成音声は別人のように聞こえる。
+#:
+#: 推測や未確認の文に「結論」を付けないこと。言い切る話し方は、内容まで言い切って聞こえる。
+PACE_NORMAL = "ふつう"
+PACES: Dict[str, Tuple[float, float, float]] = {
+    # 役割で書く
+    "問い": (1.10, 1.15, 1.0),  # 調べるきっかけ・山場の疑問。少し遅く、少し高く、抑揚を大きく
+    "発見": (1.04, 1.15, 1.5),  # 「ところが」話がひっくり返るところ。高く始めて、抑揚を大きく
+    "結論": (1.12, 1.08, -0.5),  # 言い切る 1 文。遅く、少し低く落ち着かせる
+    "補足": (0.95, 0.85, -1.0),  # 「なお」脇に置く断り。少し速く、低く、抑揚を小さく
+    "列挙": (0.95, 1.0, 0.0),  # 同じ形の項目を並べて言う。少し速く、形をそろえる
+    # 話し方で書く(gen37 から)
+    "ゆっくり": (1.14, 1.12, 0.0),
+    "速め": (0.92, 1.0, 0.0),
+    PACE_NORMAL: (1.0, 1.0, 0.0),
+}
+
+#: 強調(`〔強 ねじれます〕`)。その語を少し高く、少し長く読み、同じ文の後ろを
+#: 少し平らにする(強調した語のあとで抑揚が小さくなるのは、日本語の焦点の自然な形)。
+#: (高さを上げる半音, 拍の長さに掛ける倍率, 後ろの抑揚に掛ける倍率)
+STRESS: Tuple[float, float, float] = (2.0, 1.06, 0.85)
+
+#: 合図(読み上げない印)。中身が下の種類のどれかのときだけ合図として扱い、
 #: それ以外の〔…〕は、これまでどおり本文の括弧として読み上げる。
 #:
 #:     〔2〕        画面を 2 段目へ進める(1 から数える)
 #:     〔全体〕     画面をすべて出した状態にする
 #:     〔間 1.5〕   ここで 1.5 秒の間を足す
-#:     〔声 ゆっくり〕 この文から、話す調子を変える(`PACES`)。その画面の終わりか、
+#:     〔声 問い〕   この文から、話す調子を変える(`PACES`)。その画面の終わりか、
 #:                 次の〔声 …〕まで続く
+#:     〔強 ことば〕 「ことば」を読み上げ、強調する(`STRESS`)。字幕には「ことば」だけが出る
 CUE_ALL = "全体"
 _CUE = re.compile(
-    r"〔\s*(\d{1,3}|全体|間\s*\d+(?:\.\d+)?|声\s*(?:ゆっくり|速め|ふつう))\s*〕"
+    r"〔\s*(\d{1,3}|全体|間\s*\d+(?:\.\d+)?|声\s*(?:"
+    + "|".join(sorted(PACES, key=len, reverse=True))
+    + r"))\s*〕"
 )
 _CUE_PAUSE = re.compile(r"^間\s*(\d+(?:\.\d+)?)$")
 _CUE_VOICE = re.compile(r"^声\s*(\S+)$")
-
-#: 話す調子。名前 ->(拍の長さに掛ける倍率, 高さの動きに掛ける倍率)。
-#:
-#: 1 本を同じ調子で読み続けると、山場の文も、つなぎの文も、同じ重さで聞こえる
-#: (gen37。20 分の動画で、発話のあいだの間は 573 個のうち 557 個が 0.25 - 0.7 秒、
-#: 画面ごとの声の高さは 1 半音の幅に収まっていた)。調子は 3 つだけにして、幅も
-#: 小さくしてある。大きく変えると、合成音声は別人のように聞こえる。
-PACE_NORMAL = "ふつう"
-PACES: Dict[str, Tuple[float, float]] = {
-    "ゆっくり": (1.14, 1.12),  # 問い・結論。遅く、抑揚を少し大きく
-    "速め": (0.92, 1.0),  # 前の画面の繰り返しや、並べて言うだけの文
-    PACE_NORMAL: (1.0, 1.0),
-}
+_CUE_STRESS = re.compile(r"〔[ \t\u3000]*強[ \t\u3000]+([^〔〕]+?)[ \t\u3000]*〕")
+#: 強調の範囲を、文に分けたあとまで運ぶための印(私用領域の文字。原稿には現れない)。
+_STRESS_OPEN, _STRESS_CLOSE = "\ue000", "\ue001"
+_STRESS_SPAN = re.compile(f"{_STRESS_OPEN}(.*?){_STRESS_CLOSE}")
 
 _URL = re.compile(r"https?://\S+|www\.[^\s、。]+")
 # 行頭の箇条書き記号。文中の「・」は区切り文字(「A・B」)なので、行頭だけを見る。
@@ -140,9 +165,13 @@ _JAPANESE_SPACE = re.compile(
 class ReadingStyle:
     """読み上げの間の取り方。既定は eラーニング向けに少しゆっくりめ。"""
 
-    sentence_pause: float = 0.35  # 文と文の間
-    clause_pause: float = 0.2  # 長い文を区切ったときの間
-    line_pause: float = 0.6  # 行(段落・箇条書きの項目)の間
+    #: 間は「読点 < 文 < 段落 < 画面」の順に長くする。聞く人は間の長さで、文が
+    #: 終わったのか、話が変わったのかを聞き分ける。gen37 までは文の間 0.35 秒・段落 0.6 秒で、
+    #: 合成エンジンが読点に置く間(約 0.39 秒)のほうが文の間より長かった(gen38)。
+    #: 読点の間は合成エンジンが決めるので、VOICEVOX では縮めてそろえる(`voicevox.INNER_PAUSE_SCALE`)。
+    sentence_pause: float = 0.6  # 文と文の間
+    clause_pause: float = 0.25  # 長い文を区切ったときの間
+    line_pause: float = 0.9  # 行(段落・箇条書きの項目)の間
     lead_silence: float = 0.3  # スライドが切り替わってから話し始めるまで
     #: 最初のスライドだけ、話し始めるまでをここまで延ばす。動画が始まった直後は
     #: まだ画面を見ておらず、再生する側も音を出し始めたところなので、途中の
@@ -202,6 +231,8 @@ class Utterance:
     cue: str = ""
     #: 話す調子(`PACES` の名前)。ふつうなら空。
     pace: str = ""
+    #: 強調する語(合成へ渡す文字の中の部分文字列。書かれた順)。
+    stress: Tuple[str, ...] = ()
 
     @property
     def to_speak(self) -> str:
@@ -241,6 +272,7 @@ class ReadingPlan:
                 | ({"spoken": u.spoken} if u.spoken else {})
                 | ({"cue": u.cue} if u.cue else {})
                 | ({"pace": u.pace} if u.pace else {})
+                | ({"stress": list(u.stress)} if u.stress else {})
                 for u in self.utterances
             ],
             "notes": self.notes,
@@ -267,6 +299,9 @@ def plan_reading(
     if not text or not text.strip():
         return plan
 
+    # 強調は読み上げる文字なので、区切りの合図とは分けて、印を付けたまま運ぶ。
+    # 日本語のあいだの空白を詰める(`_normalize`)より前に印にする(「強 ことば」の空白が消えるため)。
+    text = _CUE_STRESS.sub(lambda m: f"{_STRESS_OPEN}{m.group(1)}{_STRESS_CLOSE}", text)
     lines, notes = _normalize(text, style)
     plan.notes = notes
     if not lines:
@@ -312,10 +347,18 @@ def plan_reading(
                     pause = style.sentence_pause
                 else:
                     pause = style.clause_pause
-                spoken = _apply_dictionary(piece, style, plan.notes)
+                piece, stressed = _take_stress(piece)
+                if not piece:
+                    continue
+                spoken = _to_speak(piece, style, plan.notes)
                 plan.utterances.append(
                     Utterance(
-                        piece, pause, spoken if spoken != piece else "", cue=pending_cue, pace=pace
+                        piece,
+                        pause,
+                        spoken if spoken != piece else "",
+                        cue=pending_cue,
+                        pace=pace,
+                        stress=tuple(_to_speak(word, style, []) for word in stressed),
                     )
                 )
                 pending_cue = ""
@@ -355,8 +398,28 @@ def _split_cues(line: str) -> List[tuple[str, str]]:
     return parts
 
 
+def _take_stress(piece: str) -> tuple[str, List[str]]:
+    """強調の印を外し、強調する語を書かれた順に返す。
+
+    対になっていない印(強調の中で文が切れたとき)は、黙って外す。
+    """
+    words = [w for w in _STRESS_SPAN.findall(piece) if w.strip()]
+    clean = piece.replace(_STRESS_OPEN, "").replace(_STRESS_CLOSE, "")
+    return clean, words
+
+
+def _to_speak(text: str, style: ReadingStyle, notes: List[str]) -> str:
+    """画面に出す文字から、合成へ渡す文字を作る(読み方辞書)。
+
+    片仮名の語のあいだの「・」(ド・ディオン)は、ここでは詰めない。詰めると 1 語として
+    読まれてアクセントが変わる(gen38 で試し、自然さの推定が下がった)。止まる長さだけを
+    合成の側で縮める(`voicevox.WORD_DOT_PAUSE`)。
+    """
+    return _apply_dictionary(text, style, notes)
+
+
 def _ends_sentence(text: str) -> bool:
-    stripped = text.rstrip()
+    stripped = text.replace(_STRESS_OPEN, "").replace(_STRESS_CLOSE, "").rstrip()
     return bool(stripped) and stripped[-1] in SENTENCE_ENDINGS + CLOSING_BRACKETS
 
 
@@ -369,8 +432,8 @@ def value_tail(piece: str, value: str) -> str:
 
 
 def strip_cues(text: str) -> str:
-    """合図を取り除いた原稿(字幕や一覧に、印を出さないために使う)。"""
-    return _CUE.sub("", text)
+    """合図を取り除いた原稿(字幕や一覧に、印を出さないために使う)。強調は語だけを残す。"""
+    return _CUE.sub("", _CUE_STRESS.sub(lambda m: m.group(1), text))
 
 
 def cue_names(text: str) -> List[str]:

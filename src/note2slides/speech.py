@@ -23,7 +23,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from .proc import CommandError
 
@@ -117,6 +117,8 @@ class SpeechPiece:
     #: 話す調子(`reading.PACES` の名前)。ふつうなら空。調子を変えられない
     #: エンジンは、これを見ずにふつうに読む。
     pace: str = ""
+    #: 強調する語(`text` の中の部分文字列)。強調できないエンジンは、これを見ずに読む。
+    stress: Tuple[str, ...] = ()
 
 
 @dataclass
@@ -139,6 +141,8 @@ class SpeechJob:
     #: 埋める)。分からないエンジンでは空のままで、使う側が見積もる(`audio.py`)。
     #: 画面をナレーションに合わせて変えるのに使う。
     offsets: List[float] = field(default_factory=list)
+    #: 合成はできたが、書いたとおりにはならなかったこと(強調する語が見つからない、など)。
+    warnings: List[str] = field(default_factory=list)
 
     @property
     def text(self) -> str:

@@ -16,7 +16,7 @@ import argparse
 import json
 import os
 import sys
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from . import __version__
 from . import pronunciation as pron_mod
@@ -180,9 +180,12 @@ def _report(report: pron_mod.PronunciationReport, show_lines: bool) -> None:
                 continue
             print(f"\n[{slide.index}]")
             for line in slide.lines:
-                print(f"  {line.text}")
+                print(f"  {_voice_mark(line)}{line.text}")
                 print(f"    {line.kana}")
+                if line.stress:
+                    print(f"    強調: {' / '.join(line.stress)}")
         print()
+        _report_voices(report)
 
     if report.words:
         print("英字の読み")
@@ -223,6 +226,36 @@ def _report(report: pron_mod.PronunciationReport, show_lines: bool) -> None:
         )
     else:
         print("\n読みが分かれる語は見つかりませんでした。")
+
+
+def _voice_mark(line: pron_mod.LineReading) -> str:
+    return f"〔{line.pace}〕" if line.pace else ""
+
+
+def _report_voices(report: pron_mod.PronunciationReport) -> None:
+    """話す調子を変えた文を、調子ごとにまとめて出す。
+
+    音を作る前に、調子と文の中身が合っているかを見るため(とくに、推測や未確認の文が
+    「結論」の調子で読まれると、内容まで言い切って聞こえる)。
+    """
+    by_pace: Dict[str, List[str]] = {}
+    stressed = 0
+    for slide in report.slides:
+        for line in slide.lines:
+            if line.pace:
+                by_pace.setdefault(line.pace, []).append(f"[{slide.index}] {line.text}")
+            stressed += len(line.stress)
+    if not by_pace and not stressed:
+        return
+    print("話す調子を変えた文")
+    print("=" * 60)
+    print("調子と中身が合っているかを確かめてください(推測・未確認の文に「結論」を付けない)。")
+    for pace, texts in by_pace.items():
+        print(f"\n〔{pace}〕 {len(texts)} 文")
+        for text in texts:
+            print(f"  {text}")
+    print(f"\n強調した語: {stressed} 個(各行の「強調:」)")
+    print()
 
 
 def _write_json(path: str, data) -> None:
