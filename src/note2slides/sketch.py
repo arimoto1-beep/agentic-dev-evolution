@@ -40,7 +40,7 @@ from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, 
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .staging import motion_dir, step_path
+from .staging import fit_mark, loop_dir, motion_dir, step_path
 from .style import Style
 
 Point = Tuple[float, float]
@@ -554,6 +554,8 @@ class Sketch:
             motion    この段へ移る動きを、自分で用意した絵の並びにする
                       (部品そのものを動かすとき。最後の 1 枚は、この段の姿にする)
             image     この段の姿を、自分で用意した絵にする(別の絵へ切り替えるとき)
+            fit       True なら、動きを次の合図までの長さに広げる(長さは音声で決まる)
+            loop      動きのあと、次の合図まで繰り返す絵の並び(継ぎ目なくつながる絵にする)
 
         `opening` を渡すと、最初の合図までの姿(`図@0.png`)も書き出し、1 段目にも
         そこからの動きを付ける。`図.png`(資料に載る姿)は最後の段と同じ絵になる。
@@ -581,7 +583,9 @@ class Sketch:
                         previous, step, length, float(step.get("rise", rise)), fps
                     )
             if frames:
-                save_motion(path, number, frames)
+                save_motion(path, number, frames, fit=bool(step.get("fit")))
+            if step.get("loop"):
+                save_loop(path, number, step["loop"])  # type: ignore[arg-type]
             previous = step
         if last is not None:
             last.save(path, optimize=True)
@@ -643,16 +647,42 @@ def clear_steps(path: str) -> None:
             os.remove(found)
 
 
-def save_motion(path: str, step: int, frames: Iterable[Image.Image]) -> List[str]:
+def save_motion(
+    path: str, step: int, frames: Iterable[Image.Image], fit: bool = False
+) -> List[str]:
     """絵 `path` の `step` 段目に入るときの動きを、連番で書き出す(`図@2/000.png` …)。
 
     動画は 1 枚を 1 コマとして流し、流し終えたら `図@2.png` で止まる。最後の 1 枚を
     `図@2.png` と同じ絵にしておくと、止まるときに跳ねない。
+
+    `fit=True` にすると、枚数ではなく **次の合図までの長さ** に広げて流す(`図@2/fit` を置く)。
+    動きの長さが音声で決まるので、文の長さを知らなくても、話しているあいだ動き続ける。
+    遅く流すと同じ絵が続くので、想定より多めの枚数で作っておく。
     """
     directory = motion_dir(path, step)
     if os.path.isdir(directory):
         shutil.rmtree(directory)
     os.makedirs(directory)
+    written = _save_frames(directory, frames)
+    if fit:
+        with open(fit_mark(path, step), "w", encoding="utf-8"):
+            pass
+    return written
+
+
+def save_loop(path: str, step: int, frames: Iterable[Image.Image]) -> List[str]:
+    """絵 `path` の `step` 段目で、次の合図まで繰り返す動きを書き出す(`図@2/loop/000.png` …)。
+
+    最後の 1 枚の次に最初の 1 枚が来ても跳ねない絵にする。動きがあれば、そのあとに続く。
+    """
+    directory = loop_dir(path, step)
+    if os.path.isdir(directory):
+        shutil.rmtree(directory)
+    os.makedirs(directory)
+    return _save_frames(directory, frames)
+
+
+def _save_frames(directory: str, frames: Iterable[Image.Image]) -> List[str]:
     written: List[str] = []
     for position, frame in enumerate(frames):
         target = os.path.join(directory, f"{position:03d}.png")

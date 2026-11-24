@@ -113,6 +113,7 @@ _SECTION_LABEL = {_SCREEN: "画面", _NARRATION: "ナレーション", _SETTINGS
 _KEY_LAYOUT = "layout"
 _KEY_HOLD = "hold"
 _KEY_BADGE = "label"
+_KEY_CHAPTER = "chapter"
 _KEYS = {
     "レイアウト": _KEY_LAYOUT,
     "layout": _KEY_LAYOUT,
@@ -120,8 +121,10 @@ _KEYS = {
     "hold": _KEY_HOLD,
     "札": _KEY_BADGE,
     "label": _KEY_BADGE,
+    "章": _KEY_CHAPTER,
+    "chapter": _KEY_CHAPTER,
 }
-_KEY_LABEL = {_KEY_LAYOUT: "レイアウト", _KEY_HOLD: "見る時間", _KEY_BADGE: "札"}
+_KEY_LABEL = {_KEY_LAYOUT: "レイアウト", _KEY_HOLD: "見る時間", _KEY_BADGE: "札", _KEY_CHAPTER: "章"}
 
 #: 札に書ける長さ(全角の文字数に相当する幅)。見出しの行に置くので、長い札は
 #: 見出しそのものを押し出す。文ではなく **その画面がどういう話かを示す語** に
@@ -161,6 +164,7 @@ class ScenarioSlide:
     narration: str = ""  # ナレーションセクションの Markdown(そのまま)
     hold: float = 0.0  # 読み終わったあとに画面を見せる時間(秒)
     label: str = ""  # 見出しの行の右端に置く札
+    chapter: str = ""  # この画面から始まる章の題(概要欄の章立て)
 
 
 @dataclass
@@ -391,6 +395,8 @@ class _Reader:
                 slide.layout = self._layout(number, value)
             elif key == _KEY_BADGE:
                 slide.label = self._badge(number, value)
+            elif key == _KEY_CHAPTER:
+                slide.chapter = value
             else:
                 slide.hold = self._seconds(number, value)
         if slide.label and slide.layout != LAYOUT_BODY:
@@ -491,7 +497,9 @@ def _build_slide(
     scenario: Scenario, source: ScenarioSlide, style: Style, warnings: List[str]
 ) -> Slide:
     blocks = _screen_blocks(scenario, source)
-    notes = narration_mod.compose_notes(_narration_text(scenario, source), hold=source.hold)
+    notes = narration_mod.compose_notes(
+        _narration_text(scenario, source), hold=source.hold, chapter=source.chapter
+    )
 
     if source.layout == LAYOUT_TITLE:
         return Slide(

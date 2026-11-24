@@ -331,6 +331,31 @@ def test_a_candidate_contained_in_another_is_not_a_tie():
     assert ("入って", "ハイッテ") in ambiguous(report)
 
 
+def test_narabete_read_as_nabete_is_named():
+    """「並べて見ます」はナベテと読まれた(gen39c。人が聞いて「なべてみます」と指摘)。
+
+    読点が続く「並べて、動かして」はナラベテ。同じ表記でも続く語で読みが変わるので、
+    画面ごとに分けて挙がること。仮名は VOICEVOX Nemo の実測値(gen39d)。
+    """
+    plans = {
+        17: plan_reading("なぜそうするのかは、このあと並べて見ます。", None),
+        18: plan_reading("二つを並べて、動かしてみます。", None),
+    }
+    read = fake_reader(
+        {
+            "なぜそうするのかは、このあと並べて見ます。": "ナゼソオスルノカワコノアトナベテミマス",
+            "二つを並べて、動かしてみます。": "フタツオナラベテウゴカシテミマス",
+            "ならべて": "ナラベテ",
+            "なべて": "ナベテ",
+        }
+    )
+
+    found = ambiguous(inspect_readings(plans, read))
+
+    assert found[("並べて", "ナベテ")] == [17]
+    assert found[("並べて", "ナラベテ")] == [18]
+
+
 def test_the_reading_is_never_decided_for_the_writer():
     """どちらが正しいかは言わない。候補を並べるだけ。"""
     plans = {31: plan_reading("三つの値で整理します。", None)}

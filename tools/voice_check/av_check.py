@@ -62,17 +62,20 @@ def check(scenario, audio_dir, minimum=1.0):
             folder = os.path.join(base, f"{name}@{cue['step']}")
             if not os.path.isdir(folder):
                 continue
-            length = len(os.listdir(folder)) / FPS
+            start = max(0.0, cue["at"] - LEAD)
+            next_at = cues[i + 1]["at"] - LEAD if i + 1 < len(cues) else clip["duration"]
+            # Gen39: 声に合わせる動き(fit)と繰り返し(loop)は、次の合図まで続く。
+            timed = os.path.isfile(os.path.join(folder, "fit")) or os.path.isdir(os.path.join(folder, "loop"))
+            frames = [entry for entry in os.listdir(folder) if entry.endswith(".png")]
+            length = max(0.0, next_at - start) if timed else len(frames) / FPS
             if length < minimum:
                 continue
-            start = max(0.0, cue["at"] - LEAD)
             end = start + length
             during = v[int(start * 100):int(end * 100)]
             after = v[int(end * 100):]
-            next_at = cues[i + 1]["at"] - LEAD if i + 1 < len(cues) else clip["duration"]
             rows.append({
                 "slide": clip["index"], "figure": os.path.basename(name), "step": cue["step"],
-                "start": round(start, 2), "length": round(length, 2),
+                "start": round(start, 2), "length": round(length, 2), "timed": timed,
                 "voiced": round(float(during.mean()) if len(during) else 0.0, 2),
                 "silence_after": round(float(np.argmax(after)) / 100, 2) if after.any() else None,
                 "cut": next_at < end,
@@ -90,7 +93,7 @@ def main(argv):
     print(f"{'画面':>4} {'絵':<18}{'段':>3} {'始まり':>7} {'長さ':>5} {'動き中の声':>9} {'終わり→次の声':>12}")
     for r in rows:
         after = f"{r['silence_after']:.2f}s" if r["silence_after"] is not None else "-"
-        mark = "  動きが途中で切れる" if r["cut"] else ""
+        mark = "  動きが途中で切れる" if r["cut"] else ("  声に合わせて次の合図まで" if r["timed"] else "")
         print(f"{r['slide']:>4} {r['figure']:<18}{r['step']:>3} {r['start']:7.2f} {r['length']:5.2f} "
               f"{r['voiced'] * 100:8.0f}% {after:>12}{mark}")
     return 0

@@ -103,6 +103,7 @@ class SlideCaption:
     tail_silence: float = 0.0
     pieces: List[SpeechPiece] = field(default_factory=list)
     title: str = ""
+    chapter: str = ""  # シナリオの `章:`。どこかに書かれていれば、章立てはこれだけで作る
 
     @property
     def has_speech(self) -> bool:
@@ -466,13 +467,18 @@ def build_chapters(
 ) -> List[Chapter]:
     """見出しが変わるところを章の切れ目にする。
 
+    シナリオに `章:` が書かれていれば、そこだけを章の切れ目にする(場面の題が全部
+    章になると、20 分の動画に 37 個の章が並ぶ。Gen39)。
+
     YouTube は「最初の章が 0:00 から」「1 つの章が 10 秒以上」「3 つ以上ある」を
     満たしたときだけ章立てとして扱う。前の 2 つはここで満たす(短い章は前の章に
     まとめる)。数が足りない場合はそのまま返し、呼び出し側に判断させる。
     """
     chapters: List[Chapter] = []
-    for slide in sorted(slides, key=lambda s: s.index):
-        title = _chapter_title(slide.title)
+    ordered = sorted(slides, key=lambda s: s.index)
+    marked = any(_chapter_title(slide.chapter) for slide in ordered)
+    for slide in ordered:
+        title = _chapter_title(slide.chapter if marked else slide.title)
         if not title:
             continue  # 見出しの無いスライドは前の章の続きとして扱う
         if chapters and chapters[-1].title == title:
@@ -481,6 +487,9 @@ def build_chapters(
 
     if not chapters:
         return []
+    if marked and chapters[0].start > 0 and _chapter_title(ordered[0].title):
+        # 先頭の画面に `章:` が無いときは、動画の始まりを先頭の画面の題で章にする。
+        chapters.insert(0, Chapter(start=0.0, title=_chapter_title(ordered[0].title), slide=ordered[0].index))
     if chapters[0].start > 0:
         chapters[0] = replace(chapters[0], start=0.0)
     return _merge_short_chapters(chapters, total_duration, min_duration)
@@ -592,6 +601,7 @@ def load_captions(audio_dir: Optional[str]) -> Tuple[Dict[int, SlideCaption], Li
             tail_silence=_number(entry.get("tail_silence")),
             pieces=pieces,
             title=str(entry.get("title") or ""),
+            chapter=str(entry.get("chapter") or ""),
         )
 
     if spoken and not with_pieces:

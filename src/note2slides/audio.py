@@ -126,6 +126,7 @@ class NarrationClip:
     text: str = ""  # 原稿の文章(元の記事の文言のまま)
     reading: str = ""  # 実際に合成へ渡した文字列
     title: str = ""  # スライドの見出し(章立てに使う)
+    chapter: str = ""  # シナリオの `章:`(ここから始まる章の題)
     source: str = narration_mod.SOURCE_NONE
     silent: bool = False
     utterances: int = 0  # いくつに分けて読み上げたか
@@ -156,6 +157,8 @@ class NarrationClip:
             "text": self.text,
             "reading": self.reading,
         }
+        if self.chapter:
+            data["chapter"] = self.chapter
         if self.pieces:
             data["lead_silence"] = round(self.lead_silence, 3)
             data["tail_silence"] = round(self.tail_silence, 3)
@@ -480,6 +483,7 @@ def _assemble(
                     text=segment.text,
                     reading=plan.reading,
                     title=segment.title,
+                    chapter=segment.chapter,
                     source=segment.source,
                     utterances=len(plan.utterances),
                     pieces=[SpeechPiece(u.text, u.pause_after) for u in plan.utterances],
@@ -507,6 +511,7 @@ def _assemble(
                     duration=duration,
                     text=segment.text,
                     title=segment.title,
+                    chapter=segment.chapter,
                     source=segment.source,
                     silent=True,
                     notes=plan.notes,

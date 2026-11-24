@@ -32,6 +32,9 @@ class Change:
     image: str
     fade: int = 0  # 何コマかけて溶かすか(0 なら切り替える)
     motion: Tuple[str, ...] = ()  # 溶かす代わりに流す連番
+    #: 連番を何コマに広げるか(0 なら連番の枚数どおり)。声に合わせた動きで、次の変わり目までの長さになる。
+    spread: int = 0
+    loop: Tuple[str, ...] = ()  # 動きのあと、次の変わり目まで繰り返す連番
 
 
 @dataclass
@@ -67,11 +70,34 @@ def plan_frames(
             frame = max(int(round(shot.at * fps)), busy_until)
             if frame >= total:
                 break
-            length = len(shot.motion) if shot.motion else int(round(step_fade * fps))
-            plan.changes.append(Change(frame, shot.image, 0 if shot.motion else length, shot.motion))
+            moving = bool(shot.motion or shot.loop)
+            length = len(shot.motion) if moving else int(round(step_fade * fps))
+            spread = 0
+            if shot.fit and shot.motion:
+                spread = max(1, _next_frame(shots, number, frame, total, fps) - frame)
+                length = spread
+            plan.changes.append(
+                Change(frame, shot.image, 0 if moving else length, shot.motion, spread, shot.loop)
+            )
             busy_until = frame + length
         plans.append(plan)
     return plans
+
+
+def _next_frame(shots: Sequence[Shot], number: int, frame: int, total: int, fps: int) -> int:
+    """次の変わり目のコマ(無ければスライドの終わり)。"""
+    for shot in shots[number + 1 :]:
+        at = int(round(shot.at * fps))
+        if at > frame:
+            return min(at, total)
+    return total
+
+
+def _motion_index(step: int, count: int, spread: int) -> int:
+    """広げた長さの中で、`step` コマ目に出す連番の番号(最後のコマで、ちょうど最後の絵になる)。"""
+    if spread <= 0:
+        return step
+    return min(count - 1, ((step + 1) * count - 1) // spread)
 
 
 def count_changes(plans: Sequence[SlideFrames]) -> int:
@@ -99,8 +125,8 @@ def write_frames(
             while pending and pending[0].frame <= frame:
                 change = pending.pop(0)
                 target = loader.load(change.image)
-                if change.motion:
-                    active = ("motion", frame, change.motion, target)
+                if change.motion or change.loop:
+                    active = ("motion", frame, change, target)
                 elif change.fade > 0 and last is not None:
                     active = ("fade", frame, (last, change.fade), target)
                 else:
@@ -109,14 +135,18 @@ def write_frames(
             if active is not None:
                 kind, start, payload, target = active
                 step = frame - start
-                if kind == "motion" and step < len(payload):
-                    shown = loader.load(payload[step], keep=False)
+                if kind == "motion":
+                    shown = _moving_frame(loader, payload, step)
+                    if shown is None:
+                        active, current, current_bytes = None, target, None
                 elif kind == "fade" and step < payload[1]:
                     shown = _blend(payload[0], target, _ease((step + 1) / (payload[1] + 1)))
                 else:
                     active, current, current_bytes = None, target, None
                     shown = None
                 if shown is not None:
+                    if kind == "motion":
+                        last = shown  # 繰り返しの途中でも、次はいま映っている絵から溶かす
                     stream.write(shown.tobytes())
                     written += 1
                     if on_frame:
@@ -133,9 +163,20 @@ def write_frames(
             if on_frame:
                 on_frame(written)
         # 溶かしている途中でスライドが終わっても、次は行き先の絵から続ける。
-        if active is not None:
+        if active is not None and not (active[0] == "motion" and active[2].loop):
             last = active[3]
     return written
+
+
+def _moving_frame(loader: "_Loader", change: Change, step: int) -> Optional[np.ndarray]:
+    """動きの `step` コマ目の絵。動きも繰り返しも無くなったら None。"""
+    length = change.spread or len(change.motion)
+    if step < length:
+        index = _motion_index(step, len(change.motion), change.spread)
+        return loader.load(change.motion[index], keep=False)
+    if change.loop:
+        return loader.load(change.loop[(step - length) % len(change.loop)], keep=False)
+    return None
 
 
 def _ease(t: float) -> float:

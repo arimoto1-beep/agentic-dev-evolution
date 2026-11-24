@@ -39,7 +39,7 @@ import json
 import os
 import re
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -65,6 +65,8 @@ CUE_START = "0"
 
 STEPS_DIR = "steps"
 MANIFEST_NAME = "steps.json"
+LOOP_DIR = "loop"
+FIT_MARK = "fit"
 
 #: まだ出していない段を、地の色へ寄せる割合(1.0 = 見えない)。
 HIDDEN = 1.0
@@ -100,6 +102,8 @@ class Element:
     #: 絵の側で用意する。
     opening: str = ""
     motions: Dict[int, List[str]] = field(default_factory=dict)  # 段 -> 動きの連番
+    fits: List[int] = field(default_factory=list)  # 動きを声に合わせて広げる段
+    loops: Dict[int, List[str]] = field(default_factory=dict)  # 段 -> 繰り返す連番
 
     @property
     def count(self) -> int:
@@ -112,9 +116,11 @@ class StagedSlide:
     count: int = 0  # 段の数
     images: Dict[str, str] = field(default_factory=dict)  # 合図 -> 画像
     motions: Dict[str, List[str]] = field(default_factory=dict)  # 合図 -> 動きの連番
+    fits: List[str] = field(default_factory=list)  # 動きを次の合図までの長さに広げる合図
+    loops: Dict[str, List[str]] = field(default_factory=dict)  # 合図 -> 次の合図まで繰り返す連番
 
     def to_dict(self, outdir: str = "") -> dict:
-        return {
+        data = {
             "index": self.index,
             "count": self.count,
             "images": {key: _listed(path, outdir) for key, path in self.images.items()},
@@ -123,6 +129,14 @@ class StagedSlide:
                 for key, paths in self.motions.items()
             },
         }
+        if self.fits:
+            data["fits"] = list(self.fits)
+        if self.loops:
+            data["loops"] = {
+                key: [_listed(path, outdir) for path in paths]
+                for key, paths in self.loops.items()
+            }
+        return data
 
 
 def _listed(path: str, outdir: str) -> str:
@@ -239,14 +253,21 @@ def _stage_slide(
                 staged.images[cue] = whole.frames[step - 1] if step else whole.opening
                 if step and whole.motions.get(step):
                     staged.motions[cue] = list(whole.motions[step])
+                if step and whole.loops.get(step):
+                    staged.loops[cue] = list(whole.loops[step])
+                if step in whole.fits:
+                    staged.fits.append(cue)
                 continue
             image = render_step(base, elements, step)
             path = os.path.join(outdir, f"slide_{number:03d}.step{step:02d}.png")
-            motion = _motion_of(elements, step)
+            stem = os.path.splitext(path)[0]
+            motion, loop, fit = _motion_of(elements, step)
             if motion:
-                staged.motions[cue] = _render_motion(
-                    base, elements, step, motion, os.path.splitext(path)[0]
-                )
+                staged.motions[cue] = _render_motion(base, elements, step, motion, stem)
+            if loop:
+                staged.loops[cue] = _render_motion(base, elements, step, loop, stem + ".loop")
+            if fit:
+                staged.fits.append(cue)
         image.save(path)
         staged.images[cue] = os.path.abspath(path)
     return staged
@@ -320,14 +341,16 @@ def _whole_frame(base: Image.Image, elements: Sequence[Element]) -> Optional[Ele
     return element
 
 
-def _motion_of(elements: Sequence[Element], step: int) -> List[str]:
+def _motion_of(elements: Sequence[Element], step: int) -> Tuple[List[str], List[str], bool]:
+    """段の(動きの連番, 繰り返す連番, 声に合わせて広げるか)。"""
     first = 1
     for element in elements:
         last = first + element.count - 1
         if first <= step <= last:
-            return element.motions.get(step - first + 1, [])
+            own = step - first + 1
+            return element.motions.get(own, []), element.loops.get(own, []), own in element.fits
         first = last + 1
-    return []
+    return [], [], False
 
 
 def _render_motion(
@@ -654,6 +677,23 @@ def motion_dir(image_path: str, step: int) -> str:
     return f"{os.path.splitext(image_path)[0]}@{step}"
 
 
+def loop_dir(image_path: str, step: int) -> str:
+    """絵 `図.png` の n 段目で繰り返す動きを置く場所(`図@n/loop/`)。"""
+    return os.path.join(motion_dir(image_path, step), LOOP_DIR)
+
+
+def fit_mark(image_path: str, step: int) -> str:
+    """このファイルがあると、n 段目の動きを次の合図までの長さに広げる(`図@n/fit`)。"""
+    return os.path.join(motion_dir(image_path, step), FIT_MARK)
+
+
+def _frames_in(directory: str) -> List[str]:
+    if not os.path.isdir(directory):
+        return []
+    names = sorted(name for name in os.listdir(directory) if _FRAME_NAME.match(name))
+    return [os.path.join(directory, name) for name in names]
+
+
 def figure_steps(image_path: str) -> List[str]:
     """絵の隣にある段の画像を、1 段目から途切れるまで集める。"""
     found: List[str] = []
@@ -672,11 +712,14 @@ def _figure_element(shape, scale: float, search_dirs: Sequence[str]) -> Element:
     if element.frames and os.path.isfile(step_path(source, 0)):
         element.opening = step_path(source, 0)
     for step in range(1, len(element.frames) + 1):
-        directory = motion_dir(source, step)
-        if os.path.isdir(directory):
-            names = sorted(name for name in os.listdir(directory) if _FRAME_NAME.match(name))
-            if names:
-                element.motions[step] = [os.path.join(directory, name) for name in names]
+        frames = _frames_in(motion_dir(source, step))
+        if frames:
+            element.motions[step] = frames
+        loop = _frames_in(loop_dir(source, step))
+        if loop:
+            element.loops[step] = loop
+        if os.path.isfile(fit_mark(source, step)):
+            element.fits.append(step)
     if not element.frames:
         element.kind = "item"
     return element
@@ -753,6 +796,11 @@ def load_steps(slides_dir: Optional[str]) -> Dict[int, StagedSlide]:
             key: [os.path.join(outdir, name) for name in names]
             for key, names in entry.get("motions", {}).items()
         }
+        slide.fits = [str(key) for key in entry.get("fits", [])]
+        slide.loops = {
+            key: [os.path.join(outdir, name) for name in names]
+            for key, names in entry.get("loops", {}).items()
+        }
         staged[slide.index] = slide
     return staged
 
@@ -770,11 +818,17 @@ class Shot:
     image: str
     cue: str = ""
     motion: Tuple[str, ...] = ()
+    fit: bool = False  # 動きを、次の変わり目までの長さに広げる
+    loop: Tuple[str, ...] = ()  # 動きのあと、次の変わり目まで繰り返す
 
     def to_dict(self) -> dict:
         data = {"at": round(self.at, 3), "cue": self.cue, "image": os.path.basename(self.image)}
         if self.motion:
             data["motion_frames"] = len(self.motion)
+        if self.fit:
+            data["fit"] = True
+        if self.loop:
+            data["loop_frames"] = len(self.loop)
         return data
 
 
@@ -801,11 +855,18 @@ def slide_shots(
         if not image:
             continue
         at = max(0.0, float(cue.get("at", 0.0)) - lead)
-        shot = Shot(at, image, name, tuple(staged.motions.get(name, ())))
+        shot = Shot(
+            at, image, name, tuple(staged.motions.get(name, ())), name in staged.fits,
+            tuple(staged.loops.get(name, ())),
+        )
         if cue.get("first") or at <= 0.0:
-            shots = [Shot(0.0, image, name)]  # 始まりの画面に、動きは付けない
+            if (shot.fit or shot.loop) and staged.images.get(CUE_START):
+                # 声に合わせる動きは、最初の文でも流す(切り替わりが終わってから始まる)。
+                shots.append(replace(shot, at=0.0))
+            else:
+                shots = [Shot(0.0, image, name)]  # 始まりの画面に、動きは付けない
         elif at > shots[-1].at:
             shots.append(shot)
         else:
-            shots[-1] = Shot(shots[-1].at, image, name, shot.motion)
+            shots[-1] = replace(shot, at=shots[-1].at)
     return shots

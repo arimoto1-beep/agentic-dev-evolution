@@ -62,7 +62,27 @@ def parse_article(text: str, source_path: Optional[str] = None) -> Article:
 
 def parse_article_file(path: str) -> Article:
     with open(path, "r", encoding="utf-8-sig") as f:
-        return parse_article(f.read(), source_path=path)
+        text = f.read()
+    if path.lower().endswith(".txt"):
+        text = _plain_to_markdown(text)
+    return parse_article(text, source_path=path)
+
+
+def _plain_to_markdown(text: str) -> str:
+    """平文の原稿を、記事の形にする(`.txt` のときだけ)。
+
+    Web の記事から写した原稿は、見出しが `■` の行で、最初の行が題になっている。
+    そのまま読むと、題がファイル名になり、見出しも章も無い文字の列になる。
+    Markdown の見出しや front matter があるファイルは、書いた人が決めているので触らない。
+    """
+    if _FRONT_MATTER_RE.match(text) or re.search(r"^#{1,6}\s", text, flags=re.M):
+        return text
+    lines = text.splitlines()
+    first = next((i for i, line in enumerate(lines) if line.strip()), None)
+    if first is None:
+        return text
+    lines[first] = "# " + lines[first].strip()
+    return "\n".join(re.sub(r"^■\s*(.+)$", r"## \1", line) for line in lines)
 
 
 class _Walker:

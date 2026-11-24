@@ -34,6 +34,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
+from urllib.parse import quote, unquote
 
 from . import guidance
 from .model import (
@@ -88,6 +89,7 @@ PRESENTATION_SUFFIXES = (".pptx",)
 #:
 #:     [note2slides] hold=3
 #:     [note2slides] narration=none hold=4
+#:     [note2slides] chapter=%E7%AC%AC1%E7%AB%A0   (章の題。空白を含められるように URL の形で書く)
 #:
 #: この行があるノートは「読み上げる内容が決まっている」ものとして扱い、
 #: 文章が空なら、画面の案内文を組み立てずに無音のままにする。
@@ -113,6 +115,7 @@ class NarrationSegment:
     title: str = ""
     source: str = SOURCE_NONE
     hold: float = 0.0
+    chapter: str = ""  # ここから始まる章の題(書いてあれば、章立てはこれだけで作る)
 
     @property
     def is_empty(self) -> bool:
@@ -127,6 +130,8 @@ class NarrationSegment:
         }
         if self.hold:
             data["hold"] = round(self.hold, 3)
+        if self.chapter:
+            data["chapter"] = self.chapter
         return data
 
     @classmethod
@@ -146,6 +151,7 @@ class NarrationSegment:
             # 手で書いた原稿にも対応するため、source は無ければ推定する。
             source=str(data.get("source") or (SOURCE_NOTES if text.strip() else SOURCE_NONE)),
             hold=_hold_of(data.get("hold", 0.0), index),
+            chapter=str(data.get("chapter", "")),
         )
 
 
@@ -299,6 +305,7 @@ def _segment_of(slide, number: int) -> NarrationSegment:
             title=title,
             source=SOURCE_NOTES if notes else SOURCE_NONE,
             hold=directives.hold,
+            chapter=directives.chapter,
         )
     if notes:
         return NarrationSegment(number, text=notes, title=title, source=SOURCE_NOTES)
@@ -334,9 +341,10 @@ class Directives:
 
     hold: float = 0.0
     narration: str = ""
+    chapter: str = ""
 
 
-def compose_notes(text: str, hold: float = 0.0) -> str:
+def compose_notes(text: str, hold: float = 0.0, chapter: str = "") -> str:
     """ナレーションを発表者ノートの文字列にする(指示が要る場合だけ行を足す)。"""
     body = (text or "").strip()
     parts = []
@@ -344,6 +352,8 @@ def compose_notes(text: str, hold: float = 0.0) -> str:
         parts.append(f"narration={NARRATION_NONE}")
     if hold:
         parts.append(f"hold={hold:g}")
+    if chapter:
+        parts.append("chapter=" + quote(chapter, safe=""))
     if not parts:
         return body
     line = " ".join([DIRECTIVE_PREFIX] + parts)
@@ -361,6 +371,7 @@ def split_directives(text: str, index: int = 0) -> Tuple[str, Optional[Directive
     found = False
     hold = 0.0
     narration = ""
+    chapter = ""
     for raw in normalized.split("\n"):
         line = raw.strip()
         if not line.lower().startswith(DIRECTIVE_PREFIX):
@@ -374,13 +385,16 @@ def split_directives(text: str, index: int = 0) -> Tuple[str, Optional[Directive
                 hold = _directive_seconds(value, index, line)
             elif key == "narration":
                 narration = _directive_narration(value, index, line)
+            elif key == "chapter":
+                chapter = unquote(value).strip()
             else:
                 raise NarrationError(
                     f"スライド {index} のノートに知らない指示があります: {token}\n"
                     f"  {line}\n"
-                    "  書けるのは narration=none と hold=<秒> です。"
+                    "  書けるのは narration=none と hold=<秒> と chapter=<題> です。"
                 )
-    return "\n".join(body), (Directives(hold=hold, narration=narration) if found else None)
+    directives = Directives(hold=hold, narration=narration, chapter=chapter) if found else None
+    return "\n".join(body), directives
 
 
 def _directive_narration(value: str, index: int, line: str) -> str:
